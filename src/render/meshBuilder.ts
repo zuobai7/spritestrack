@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { VoxelGrid } from '../core/VoxelGrid';
 import { buildCulledMesh, buildGreedyQuads, type MeshOptions } from '../core/mesher';
+import type { RigPart } from '../core/rig';
 
 const tmp = new THREE.Color();
 
@@ -16,18 +17,44 @@ export function linearPalette(palette: number[]): Float32Array {
   return out;
 }
 
-/** Viewport geometry: one quad per visible face, vertex colors darkened by AO. */
-export function culledGeometry(grid: VoxelGrid, palette: number[], opts: MeshOptions & { minY?: number } = {}): THREE.BufferGeometry {
+/**
+ * Viewport geometry: one quad per visible face, vertex colors darkened by AO.
+ * With `parts`, colors are tinted by the part each voxel belongs to.
+ */
+export function culledGeometry(
+  grid: VoxelGrid,
+  palette: number[],
+  opts: MeshOptions & { minY?: number; parts?: { map: VoxelGrid; parts: RigPart[] } } = {},
+): THREE.BufferGeometry {
   const src = opts.minY ? sliceAbove(grid, opts.minY) : grid;
   const m = buildCulledMesh(src, opts);
   const lin = linearPalette(palette);
   const colors = new Float32Array(m.colorIndex.length * 3);
+  let partLin: Map<number, [number, number, number]> | null = null;
+  if (opts.parts) {
+    partLin = new Map();
+    for (const p of opts.parts.parts) {
+      tmp.setHex(p.color);
+      partLin.set(p.id, [tmp.r, tmp.g, tmp.b]);
+    }
+  }
   for (let i = 0; i < m.colorIndex.length; i++) {
     const c = m.colorIndex[i];
     const a = m.ao[i];
-    colors[i * 3] = (lin[c * 3] ?? 1) * a;
-    colors[i * 3 + 1] = (lin[c * 3 + 1] ?? 0) * a;
-    colors[i * 3 + 2] = (lin[c * 3 + 2] ?? 1) * a;
+    let r = lin[c * 3] ?? 1;
+    let g = lin[c * 3 + 1] ?? 0;
+    let b = lin[c * 3 + 2] ?? 1;
+    if (partLin) {
+      const pc = partLin.get(opts.parts!.map.data[m.cell[i]]);
+      if (pc) {
+        r = r * 0.35 + pc[0] * 0.65;
+        g = g * 0.35 + pc[1] * 0.65;
+        b = b * 0.35 + pc[2] * 0.65;
+      }
+    }
+    colors[i * 3] = r * a;
+    colors[i * 3 + 1] = g * a;
+    colors[i * 3 + 2] = b * a;
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));

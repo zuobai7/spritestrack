@@ -10,13 +10,17 @@ export interface ModelExportOptions {
 }
 
 /** Exports a Wavefront OBJ + MTL pair. One material per palette color used. */
-export function exportObj(grid: VoxelGrid, palette: number[], name: string, opts: ModelExportOptions): { obj: string; mtl: string } {
+export function exportObj(
+  grid: VoxelGrid,
+  palette: number[],
+  name: string,
+  opts: ModelExportOptions & { mtlName?: string },
+): { obj: string; mtl: string } {
   const quads = buildGreedyQuads(grid);
   const ox = opts.center ? grid.sx / 2 : 0;
   const oz = opts.center ? grid.sz / 2 : 0;
   const s = opts.scale;
-  const fmt = (n: number) => (Math.round(n * 1e5) / 1e5).toString();
-  const lines: string[] = [`# Exported by SpriteStrack`, `mtllib ${name}.mtl`, `o ${name}`];
+  const lines: string[] = [`# Exported by SpriteStrack`, `mtllib ${opts.mtlName ?? name}.mtl`, `o ${name}`];
   const normals = ['1 0 0', '-1 0 0', '0 1 0', '0 -1 0', '0 0 1', '0 0 -1'];
   for (const n of normals) lines.push(`vn ${n}`);
   const normalIndex = (n: number[]) => normals.indexOf(n.join(' ')) + 1;
@@ -30,11 +34,18 @@ export function exportObj(grid: VoxelGrid, palette: number[], name: string, opts
     if (!byColor.has(q.color)) byColor.set(q.color, []);
     byColor.get(q.color)!.push(face);
   }
+  for (const [color, faces] of [...byColor].sort((a, b) => a[0] - b[0])) lines.push(`usemtl color_${color}`, ...faces);
+  return { obj: lines.join('\n') + '\n', mtl: exportMtl(palette, byColor.keys()) };
+}
+
+const fmt = (n: number) => (Math.round(n * 1e5) / 1e5).toString();
+
+/** Material library with one flat material per palette index, shared by OBJ files that use `color_<index>`. */
+export function exportMtl(palette: number[], colors: Iterable<number>): string {
   const mtl: string[] = ['# Exported by SpriteStrack'];
-  for (const [color, faces] of [...byColor].sort((a, b) => a[0] - b[0])) {
-    lines.push(`usemtl color_${color}`, ...faces);
+  for (const color of [...new Set(colors)].sort((a, b) => a - b)) {
     const [r, g, b] = rgb(palette[color] ?? 0xff00ff);
     mtl.push(`newmtl color_${color}`, `Kd ${fmt(r / 255)} ${fmt(g / 255)} ${fmt(b / 255)}`, 'Ka 0 0 0', 'Ks 0 0 0', 'd 1', 'illum 1', '');
   }
-  return { obj: lines.join('\n') + '\n', mtl: mtl.join('\n') };
+  return mtl.join('\n');
 }

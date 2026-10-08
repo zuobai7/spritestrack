@@ -14,6 +14,8 @@ export interface Render3dOptions {
   light: LightSettings;
   outline: number | null;
   scale: number;
+  /** 'normal' = view-space normal map, 'depth' = white is near. */
+  pass?: 'color' | 'normal' | 'depth';
 }
 
 /**
@@ -31,6 +33,9 @@ export class Sprite3dRenderer {
   private sun = new THREE.DirectionalLight(0xffffff, 1);
   private ambient = new THREE.AmbientLight(0xffffff, 1);
   private canvas: HTMLCanvasElement;
+  private target: THREE.WebGLRenderTarget | null = null;
+  private normalMat = new THREE.MeshNormalMaterial();
+  private depthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.BasicDepthPacking });
 
   constructor() {
     this.canvas = document.createElement('canvas');
@@ -53,6 +58,9 @@ export class Sprite3dRenderer {
 
   dispose(): void {
     this.mesh.geometry.dispose();
+    this.target?.dispose();
+    this.normalMat.dispose();
+    this.depthMat.dispose();
     this.renderer.dispose();
   }
 
@@ -86,6 +94,12 @@ export class Sprite3dRenderer {
       this.camera = cam;
     }
     const dist = o.orthographic ? radius * 3 : radius / Math.sin((15 * Math.PI) / 180);
+    const pass = o.pass ?? 'color';
+    if (pass === 'depth') {
+      // Tight depth range so the gradient uses the full 0..255
+      this.camera.near = Math.max(0.01, dist - radius);
+      this.camera.far = dist + radius;
+    }
     this.camera.position.copy(center).addScaledVector(camDir, dist);
     this.camera.lookAt(center);
     this.camera.updateProjectionMatrix();
@@ -107,10 +121,28 @@ export class Sprite3dRenderer {
     this.ground.scale.set(radius * 6, radius * 6, 1);
     (this.ground.material as THREE.ShadowMaterial).opacity = L.shadowOpacity;
 
-    this.renderer.render(this.scene, this.camera);
-    const gl = this.renderer.getContext();
     const buf = new Uint8Array(size * size * 4);
-    gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    if (pass === 'color') {
+      this.renderer.render(this.scene, this.camera);
+      const gl = this.renderer.getContext();
+      gl.readPixels(0, 0, size, size, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    } else {
+      // Data passes go through a linear render target so values aren't color-managed
+      if (!this.target || this.target.width !== size) {
+        this.target?.dispose();
+        this.target = new THREE.WebGLRenderTarget(size, size);
+      }
+      const groundVisible = this.ground.visible;
+      this.ground.visible = false;
+      this.scene.overrideMaterial = pass === 'normal' ? this.normalMat : this.depthMat;
+      this.renderer.setRenderTarget(this.target);
+      this.renderer.clear();
+      this.renderer.render(this.scene, this.camera);
+      this.renderer.readRenderTargetPixels(this.target, 0, 0, size, size, buf);
+      this.renderer.setRenderTarget(null);
+      this.scene.overrideMaterial = null;
+      this.ground.visible = groundVisible;
+    }
     const img = createImage(size, size);
     for (let y = 0; y < size; y++) img.data.set(buf.subarray((size - 1 - y) * size * 4, (size - y) * size * 4), y * size * 4);
     // Hard alpha for clean pixel art; keep partial alpha only for shadow pixels
@@ -123,7 +155,8 @@ export class Sprite3dRenderer {
         img.data[i + 2] = Math.min(255, Math.round((img.data[i + 2] * 255) / a));
       }
     }
-    let out = o.outline !== null ? outlineImage(img, o.outline) : img;
+    const outline = o.outline === null ? null : pass === 'normal' ? 0x8080ff : pass === 'depth' ? 0x000000 : o.outline;
+    let out = outline !== null ? outlineImage(img, outline) : img;
     out = scaleImage(out, o.scale);
     return out;
   }

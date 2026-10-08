@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { Editor } from '../editor/Editor';
 import { raycastAxisPlane, raycastGrid, raycastPlaneY, type Vec3 } from '../core/raycast';
-import { boxCells, floodCells, lineCells, surfaceFillCells } from '../core/tools';
+import { boxCells, floodCells, lineCells, normBox, surfaceFillCells } from '../core/tools';
 import { culledGeometry, lightVector } from './meshBuilder';
 
 interface PickResult {
@@ -13,9 +13,21 @@ interface PickResult {
   normal: Vec3;
 }
 
+interface Drag {
+  erase: boolean;
+  start: Vec3 | null;
+  axis: number;
+  level: number;
+  last: Vec3 | null;
+  moved: boolean;
+}
+
+export type ViewName = 'front' | 'back' | 'left' | 'right' | 'top' | 'iso';
+
 /**
  * The 3D editing view: renders the current frame, the grid, the layer plane,
- * onion skin and the cursor, and turns pointer input into tool actions.
+ * onion skin, selection, parts and reference image, and turns pointer input
+ * into tool actions.
  */
 export class Viewport {
   readonly renderer: THREE.WebGLRenderer;
@@ -30,14 +42,19 @@ export class Viewport {
   private layerPlane: THREE.Mesh;
   private cursor: THREE.LineSegments;
   private cursorFill: THREE.Mesh;
+  private selectionBox: THREE.LineSegments;
+  private pivots = new THREE.Group();
+  private reference: THREE.Mesh;
+  private referenceUrl = '';
   private ground: THREE.Mesh;
   private sun: THREE.DirectionalLight;
   private ambient: THREE.HemisphereLight;
   private material = new THREE.MeshLambertMaterial({ vertexColors: true });
   private raycaster = new THREE.Raycaster();
-  private drag: { button: number; erase: boolean; start: Vec3 | null; axis: number; level: number; last: Vec3 | null } | null = null;
+  private drag: Drag | null = null;
   private needsRender = true;
   private altDown = false;
+  private viewKey = '';
   onStatus: (text: string) => void = () => {};
 
   constructor(
@@ -50,8 +67,8 @@ export class Viewport {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(this.renderer.domElement);
 
-    this.scene.background = new THREE.Color(0x1e1f26);
-    this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 2000);
+    this.scene.background = new THREE.Color(0x1b1c22);
+    this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 4000);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.15;
@@ -83,7 +100,7 @@ export class Viewport {
     this.ground.receiveShadow = true;
     this.layerPlane = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1),
-      new THREE.MeshBasicMaterial({ color: 0x5aa0ff, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: 0x5aa0ff, transparent: true, opacity: 0.1, side: THREE.DoubleSide, depthWrite: false }),
     );
     this.layerPlane.rotation.x = -Math.PI / 2;
     const cubeEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
@@ -92,7 +109,29 @@ export class Viewport {
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthWrite: false }),
     );
-    this.root.add(this.voxelMesh, this.ghostMesh, this.onionMesh, this.ground, this.gridLines, this.layerPlane, this.cursor, this.cursorFill);
+    this.selectionBox = new THREE.LineSegments(
+      cubeEdges.clone(),
+      new THREE.LineBasicMaterial({ color: 0xffd23d, depthTest: false, transparent: true }),
+    );
+    this.selectionBox.renderOrder = 10;
+    this.reference = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false }),
+    );
+    this.reference.visible = false;
+    this.root.add(
+      this.voxelMesh,
+      this.ghostMesh,
+      this.onionMesh,
+      this.ground,
+      this.gridLines,
+      this.layerPlane,
+      this.cursor,
+      this.cursorFill,
+      this.selectionBox,
+      this.pivots,
+      this.reference,
+    );
 
     const el = this.renderer.domElement;
     el.addEventListener('pointerdown', (e) => this.onDown(e));
@@ -102,16 +141,26 @@ export class Viewport {
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     window.addEventListener('keydown', (e) => this.setAlt(e.altKey));
     window.addEventListener('keyup', (e) => this.setAlt(e.altKey));
+    window.addEventListener('blur', () => this.setAlt(false));
     new ResizeObserver(() => this.resize()).observe(container);
 
     editor.on('model', () => this.rebuildMesh());
     editor.on('frame', () => this.rebuildMesh());
     editor.on('palette', () => this.rebuildMesh());
-    editor.on('state', () => {
-      this.rebuildMesh();
-      this.updateLayerPlane();
+    editor.on('rig', () => {
+      if (this.editor.partOverlay) this.rebuildMesh();
+      this.updatePivots();
     });
+    editor.on('state', () => {
+      const key = this.currentViewKey();
+      if (key !== this.viewKey) this.rebuildMesh();
+      this.updateLayerPlane();
+      this.updatePivots();
+      this.updateReference();
+    });
+    editor.on('selection', () => this.updateSelection());
     editor.on('light', () => this.updateLight());
+    editor.on('reference', () => this.updateReference());
     editor.on('project', () => this.rebuildAll(true));
     editor.on('frames', () => this.rebuildAll(false));
 
@@ -126,6 +175,11 @@ export class Viewport {
       }
     };
     loop();
+  }
+
+  private currentViewKey(): string {
+    const ed = this.editor;
+    return [ed.mode, ed.layer, ed.ao, ed.onion, ed.showAbove, ed.partOverlay, ed.playing].join('|');
   }
 
   private setAlt(on: boolean): void {
@@ -143,14 +197,28 @@ export class Viewport {
     this.needsRender = true;
   }
 
-  /** Recenters the camera on the model volume. */
-  resetCamera(): void {
+  /** Points the camera at the model from a preset direction. */
+  setView(view: ViewName): void {
     const { sx, sy, sz } = this.editor.project;
-    const r = Math.max(sx, sy, sz);
-    this.controls.target.set(0, sy * 0.4, 0);
-    this.camera.position.set(r * 1.25, r * 1.1, r * 1.6);
+    const r = Math.max(sx, sy, sz) * 2.1;
+    const target = new THREE.Vector3(0, sy * 0.4, 0);
+    const dirs: Record<ViewName, [number, number, number]> = {
+      front: [0, 0.15, 1],
+      back: [0, 0.15, -1],
+      left: [-1, 0.15, 0],
+      right: [1, 0.15, 0],
+      top: [0, 1, 0.0001],
+      iso: [0.75, 0.65, 1],
+    };
+    const d = new THREE.Vector3(...dirs[view]).normalize();
+    this.controls.target.copy(target);
+    this.camera.position.copy(target).addScaledVector(d, r);
     this.controls.update();
     this.needsRender = true;
+  }
+
+  resetCamera(): void {
+    this.setView('iso');
   }
 
   private rebuildAll(resetCam: boolean): void {
@@ -161,6 +229,9 @@ export class Viewport {
     this.buildGrid();
     this.updateLayerPlane();
     this.updateLight();
+    this.updateSelection();
+    this.updatePivots();
+    this.updateReference();
     this.rebuildMesh();
     if (resetCam) this.resetCamera();
   }
@@ -173,20 +244,18 @@ export class Viewport {
     for (let z = 0; z <= sz; z++) pts.push(0, 0, z, sx, 0, z);
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    const lines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x3a3d4d }));
-    // Bounding volume
+    const lines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x353846 }));
     const box = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(sx, sy, sz)),
       new THREE.LineBasicMaterial({ color: 0x4a4e63, transparent: true, opacity: 0.6 }),
     );
     box.position.set(sx / 2, sy / 2, sz / 2);
-    // Axis hint: red = +x, blue = +z (front)
+    // Axis hint: red = +x, blue = +z (the front)
     const axis = new THREE.BufferGeometry();
     axis.setAttribute('position', new THREE.Float32BufferAttribute([0, 0.01, 0, sx, 0.01, 0, 0, 0.01, 0, 0, 0.01, sz], 3));
     axis.setAttribute('color', new THREE.Float32BufferAttribute([1, 0.3, 0.3, 1, 0.3, 0.3, 0.3, 0.5, 1, 0.3, 0.5, 1], 3));
     const axes = new THREE.LineSegments(axis, new THREE.LineBasicMaterial({ vertexColors: true }));
     this.gridLines.add(lines, box, axes);
-    this.gridLines.visible = this.editor.showGrid;
     this.needsRender = true;
   }
 
@@ -197,11 +266,7 @@ export class Viewport {
     this.layerPlane.scale.set(sx, sz, 1);
     this.layerPlane.position.set(sx / 2, this.editor.layer + 0.002, sz / 2);
     this.gridLines.visible = this.editor.showGrid;
-    if (layerMode) {
-      this.gridLines.position.y = this.editor.layer;
-    } else {
-      this.gridLines.position.y = 0;
-    }
+    this.gridLines.position.y = layerMode ? this.editor.layer : 0;
     this.needsRender = true;
   }
 
@@ -228,12 +293,84 @@ export class Viewport {
     this.needsRender = true;
   }
 
+  private updateSelection(): void {
+    const s = this.editor.selection;
+    this.selectionBox.visible = !!s;
+    if (s) {
+      const size = [s.max[0] - s.min[0] + 1, s.max[1] - s.min[1] + 1, s.max[2] - s.min[2] + 1];
+      this.selectionBox.scale.set(size[0] + 0.04, size[1] + 0.04, size[2] + 0.04);
+      this.selectionBox.position.set(s.min[0] + size[0] / 2, s.min[1] + size[1] / 2, s.min[2] + size[2] / 2);
+    }
+    this.needsRender = true;
+  }
+
+  private updatePivots(): void {
+    this.pivots.clear();
+    const rig = this.editor.project.rig;
+    if (!rig || !this.editor.partOverlay) return void (this.needsRender = true);
+    const r = Math.max(0.25, Math.max(this.editor.project.sx, this.editor.project.sy) / 64);
+    for (const p of rig.parts) {
+      const active = p.id === this.editor.activePart;
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(active ? r * 1.6 : r, 12, 8),
+        new THREE.MeshBasicMaterial({ color: p.color, depthTest: false, transparent: true, opacity: active ? 1 : 0.7 }),
+      );
+      m.renderOrder = 11;
+      m.position.set(p.pivot[0], p.pivot[1], p.pivot[2]);
+      this.pivots.add(m);
+    }
+    this.needsRender = true;
+  }
+
+  private updateReference(): void {
+    const ref = this.editor.reference;
+    const mesh = this.reference;
+    if (!ref || !ref.visible) {
+      mesh.visible = false;
+      this.needsRender = true;
+      return;
+    }
+    const mat = mesh.material as THREE.MeshBasicMaterial;
+    if (ref.url !== this.referenceUrl) {
+      this.referenceUrl = ref.url;
+      new THREE.TextureLoader().load(ref.url, (tex) => {
+        tex.magFilter = THREE.NearestFilter;
+        tex.minFilter = THREE.NearestFilter;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        mat.map?.dispose();
+        mat.map = tex;
+        mat.needsUpdate = true;
+        this.needsRender = true;
+      });
+    }
+    mat.opacity = ref.opacity;
+    const { sx, sz } = this.editor.project;
+    const w = ref.size;
+    const h = (ref.size * ref.height) / Math.max(1, ref.width);
+    mesh.scale.set(w, h, 1);
+    mesh.rotation.set(0, 0, 0);
+    if (ref.plane === 'front') {
+      mesh.position.set(sx / 2 + ref.offsetX, h / 2 + ref.offsetY, -0.02);
+    } else if (ref.plane === 'side') {
+      mesh.rotation.y = Math.PI / 2;
+      mesh.position.set(-0.02, h / 2 + ref.offsetY, sz / 2 + ref.offsetX);
+    } else {
+      mesh.rotation.x = -Math.PI / 2;
+      const y = ref.followLayer && this.editor.mode === 'layer' ? this.editor.layer + 0.004 : -0.02;
+      mesh.position.set(sx / 2 + ref.offsetX, y, sz / 2 + ref.offsetY);
+    }
+    mesh.visible = true;
+    this.needsRender = true;
+  }
+
   rebuildMesh(): void {
     const ed = this.editor;
+    this.viewKey = this.currentViewKey();
     const layerMode = ed.mode === 'layer';
     const maxY = layerMode ? ed.layer : Infinity;
+    const parts = ed.partOverlay && ed.project.rig ? { map: ed.project.rig.partMap, parts: ed.project.rig.parts } : undefined;
     this.voxelMesh.geometry.dispose();
-    this.voxelMesh.geometry = culledGeometry(ed.frame, ed.project.palette, { maxY, ao: ed.ao });
+    this.voxelMesh.geometry = culledGeometry(ed.frame, ed.project.palette, { maxY, ao: ed.ao, parts });
     this.ghostMesh.geometry.dispose();
     this.ghostMesh.visible = layerMode && ed.showAbove && ed.layer < ed.project.sy - 1;
     this.ghostMesh.geometry = this.ghostMesh.visible
@@ -286,23 +423,46 @@ export class Viewport {
     const ed = this.editor;
     ed.stop();
     const r = this.pick(e);
-    const erase = e.shiftKey && (ed.tool === 'add' || ed.tool === 'box' || ed.tool === 'line');
     const axis = r.normal[0] ? 0 : r.normal[1] ? 1 : 2;
     this.renderer.domElement.setPointerCapture(e.pointerId);
+
+    if (ed.pivotPick !== null) {
+      // Pivot goes to the center of the clicked face (or the ground cell)
+      const id = ed.pivotPick;
+      ed.pivotPick = null;
+      if (r.target) {
+        const v = r.target;
+        ed.updatePart(id, { pivot: [v[0] + 0.5 + r.normal[0] * 0.5, v[1] + 0.5 + r.normal[1] * 0.5, v[2] + 0.5 + r.normal[2] * 0.5] });
+      } else if (r.place) ed.updatePart(id, { pivot: [r.place[0] + 0.5, r.place[1], r.place[2] + 0.5] });
+      ed.emit('state');
+      return;
+    }
+
+    const erase = e.shiftKey && (ed.tool === 'add' || ed.tool === 'box' || ed.tool === 'line');
     switch (ed.tool) {
       case 'add': {
         const c = erase ? r.target : r.place;
         if (!c) return;
         ed.beginStroke();
-        ed.strokeSet([c], erase ? 0 : ed.color);
-        this.drag = { button: 0, erase, start: c, axis, level: c[axis], last: c };
+        ed.strokeSet(ed.brushAt(c), erase ? 0 : ed.color, erase ? 'set' : 'add');
+        this.drag = { erase, start: c, axis, level: c[axis], last: c, moved: false };
         break;
       }
       case 'erase':
       case 'paint': {
         ed.beginStroke();
-        if (r.target) ed.strokeSet([r.target], ed.tool === 'erase' ? 0 : ed.color);
-        this.drag = { button: 0, erase: ed.tool === 'erase', start: r.target, axis, level: 0, last: r.target };
+        if (r.target) ed.strokeSet(ed.brushAt(r.target), ed.tool === 'erase' ? 0 : ed.color, ed.tool === 'erase' ? 'set' : 'paint');
+        this.drag = { erase: ed.tool === 'erase', start: r.target, axis, level: 0, last: r.target, moved: false };
+        break;
+      }
+      case 'part': {
+        if (e.shiftKey) {
+          if (r.target) ed.assignConnectedToPart(r.target);
+          return;
+        }
+        ed.beginStroke('parts');
+        if (r.target) ed.strokeSet(ed.brushAt(r.target), ed.activePart);
+        this.drag = { erase: false, start: r.target, axis, level: 0, last: r.target, moved: false };
         break;
       }
       case 'pick': {
@@ -322,7 +482,17 @@ export class Viewport {
       case 'line': {
         const c = erase ? r.target : r.place;
         if (!c) return;
-        this.drag = { button: 0, erase, start: c, axis, level: c[axis], last: c };
+        this.drag = { erase, start: c, axis, level: c[axis], last: c, moved: false };
+        this.showShape(c, c);
+        break;
+      }
+      case 'select': {
+        const c = ed.mode === 'layer' ? r.place : r.target ?? r.place;
+        if (!c) {
+          ed.setSelection(null);
+          return;
+        }
+        this.drag = { erase: false, start: c, axis, level: c[axis], last: c, moved: false };
         this.showShape(c, c);
         break;
       }
@@ -340,23 +510,32 @@ export class Viewport {
       case 'add': {
         const c = this.pickOnPlane(e, d.axis, d.level);
         if (c && (!d.last || c.some((v, i) => v !== d.last![i]))) {
-          ed.strokeSet(d.last ? lineCells(d.last, c) : [c], d.erase ? 0 : ed.color);
+          const path = d.last ? lineCells(d.last, c) : [c];
+          ed.strokeSet(path.flatMap((p) => ed.brushAt(p)), d.erase ? 0 : ed.color, d.erase ? 'set' : 'add');
           d.last = c;
         }
-        this.showCursorAt(c, d.erase);
+        this.showBrushAt(c, d.erase);
         break;
       }
       case 'erase':
-      case 'paint': {
+      case 'paint':
+      case 'part': {
         const r = this.pick(e);
-        if (r.target) ed.strokeSet([r.target], ed.tool === 'erase' ? 0 : ed.color);
-        this.showCursorAt(r.target, ed.tool === 'erase');
+        if (r.target) {
+          const value = ed.tool === 'part' ? ed.activePart : ed.tool === 'erase' ? 0 : ed.color;
+          ed.strokeSet(ed.brushAt(r.target), value, ed.tool === 'paint' ? 'paint' : 'set');
+        }
+        this.showBrushAt(r.target, ed.tool === 'erase');
         break;
       }
       case 'box':
-      case 'line': {
+      case 'line':
+      case 'select': {
         const c = this.pickOnPlane(e, d.axis, d.level);
-        if (c) d.last = c;
+        if (c) {
+          if (d.last && c.some((v, i) => v !== d.last![i])) d.moved = true;
+          d.last = c;
+        }
         if (d.start && d.last) this.showShape(d.start, d.last);
         break;
       }
@@ -374,6 +553,24 @@ export class Viewport {
         ed.applyCells(cells, d.erase ? 0 : ed.color, ed.tool);
       }
       this.hideCursor();
+    } else if (ed.tool === 'select') {
+      this.hideCursor();
+      if (!d.start || !d.last) return;
+      if (!d.moved && ed.mode === '3d') {
+        // A click (no drag) selects the connected object
+        if (ed.frame.get(d.start[0], d.start[1], d.start[2])) ed.selectConnected(d.start);
+        else ed.setSelection(null);
+        return;
+      }
+      const b = normBox(d.start, d.last);
+      const size = [ed.project.sx, ed.project.sy, ed.project.sz];
+      if (ed.mode === '3d' || e.shiftKey) {
+        // Extend through the whole model along the axis the drag plane faces
+        const ax = ed.mode === '3d' ? d.axis : 1;
+        b.min[ax] = 0;
+        b.max[ax] = size[ax] - 1;
+      }
+      ed.setSelection(b);
     } else {
       ed.endStroke(ed.tool);
     }
@@ -382,31 +579,62 @@ export class Viewport {
   private updateCursor(e: PointerEvent): void {
     const ed = this.editor;
     const r = this.pick(e);
+    if (ed.pivotPick !== null) {
+      this.showCursorAt(r.target ?? r.place, false, 1);
+      this.onStatus('⊕');
+      return;
+    }
     const erase = ed.tool === 'erase' || (e.shiftKey && (ed.tool === 'add' || ed.tool === 'box' || ed.tool === 'line'));
-    const usesTarget = erase || ed.tool === 'paint' || ed.tool === 'pick' || (ed.tool === 'fill' && ed.mode === '3d');
+    const usesTarget =
+      erase || ed.tool === 'paint' || ed.tool === 'pick' || ed.tool === 'part' || (ed.tool === 'fill' && ed.mode === '3d') || (ed.tool === 'select' && ed.mode === '3d');
     const c = usesTarget ? r.target : r.place;
-    this.showCursorAt(c, erase);
+    const brushed = ed.tool === 'add' || ed.tool === 'erase' || ed.tool === 'paint' || ed.tool === 'part';
+    if (brushed) this.showBrushAt(c, erase);
+    else this.showCursorAt(c, erase, 1);
     if (c) {
       const v = ed.frame.get(c[0], c[1], c[2]);
-      this.onStatus(`x ${c[0]}  y ${c[1]}  z ${c[2]}${v ? `  #${v}` : ''}`);
+      const part = ed.project.rig && v ? ed.project.rig.parts.find((p) => p.id === ed.project.rig!.partMap.get(c[0], c[1], c[2])) : undefined;
+      this.onStatus(`x ${c[0]}  y ${c[1]}  z ${c[2]}${v ? `  #${v}` : ''}${part && ed.partOverlay ? `  · ${part.name}` : ''}`);
     } else this.onStatus('');
   }
 
-  private showCursorAt(c: Vec3 | null, erase: boolean): void {
+  private showBrushAt(c: Vec3 | null, erase: boolean): void {
+    if (!c) return this.hideCursor();
+    const n = this.editor.brush.size;
+    if (n <= 1) return this.showCursorAt(c, erase, 1);
+    const cells = this.editor.brushAt(c);
+    const min: Vec3 = [Infinity, Infinity, Infinity];
+    const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    for (const p of cells)
+      for (let a = 0; a < 3; a++) {
+        min[a] = Math.min(min[a], p[a]);
+        max[a] = Math.max(max[a], p[a]);
+      }
+    this.showShape(min, max, erase);
+  }
+
+  private showCursorAt(c: Vec3 | null, erase: boolean, size: number): void {
     if (!c) return this.hideCursor();
     this.cursor.visible = true;
     this.cursorFill.visible = true;
-    this.cursor.scale.set(1.02, 1.02, 1.02);
-    this.cursorFill.scale.set(1.0, 1.0, 1.0);
+    this.cursor.scale.set(size + 0.02, size + 0.02, size + 0.02);
+    this.cursorFill.scale.set(size, size, size);
     this.cursor.position.set(c[0] + 0.5, c[1] + 0.5, c[2] + 0.5);
     this.cursorFill.position.copy(this.cursor.position);
-    const color = erase ? 0xff4466 : new THREE.Color(this.editor.project.palette[this.editor.color]).getHex();
-    (this.cursor.material as THREE.LineBasicMaterial).color.setHex(erase ? 0xff4466 : 0xffffff);
-    (this.cursorFill.material as THREE.MeshBasicMaterial).color.setHex(color);
+    this.tintCursor(erase);
     this.needsRender = true;
   }
 
-  private showShape(a: Vec3, b: Vec3): void {
+  private tintCursor(erase: boolean): void {
+    const ed = this.editor;
+    let fill = new THREE.Color(ed.project.palette[ed.color] ?? 0xffffff).getHex();
+    if (ed.tool === 'part' && ed.project.rig) fill = ed.project.rig.parts.find((p) => p.id === ed.activePart)?.color ?? fill;
+    if (ed.tool === 'select') fill = 0xffd23d;
+    (this.cursor.material as THREE.LineBasicMaterial).color.setHex(erase ? 0xff4466 : 0xffffff);
+    (this.cursorFill.material as THREE.MeshBasicMaterial).color.setHex(erase ? 0xff4466 : fill);
+  }
+
+  private showShape(a: Vec3, b: Vec3, erase = false): void {
     const min = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.min(a[2], b[2])];
     const max = [Math.max(a[0], b[0]) + 1, Math.max(a[1], b[1]) + 1, Math.max(a[2], b[2]) + 1];
     this.cursor.visible = true;
@@ -416,7 +644,8 @@ export class Viewport {
     this.cursorFill.scale.set(s[0], s[1], s[2]);
     this.cursor.position.set((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
     this.cursorFill.position.copy(this.cursor.position);
-    this.onStatus(`${s[0]} × ${s[1]} × ${s[2]}`);
+    this.tintCursor(erase || (this.drag?.erase ?? false));
+    if (this.drag) this.onStatus(`${s[0]} × ${s[1]} × ${s[2]}`);
     this.needsRender = true;
   }
 
@@ -428,11 +657,5 @@ export class Viewport {
 
   requestRender(): void {
     this.needsRender = true;
-  }
-
-  /** PNG snapshot of the current view (for thumbnails or sharing). */
-  screenshot(): string {
-    this.renderer.render(this.scene, this.camera);
-    return this.renderer.domElement.toDataURL('image/png');
   }
 }

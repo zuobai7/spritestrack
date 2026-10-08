@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import type { RgbaImage } from '../export/image';
 
 type Attrs = Record<string, unknown> & { class?: string; style?: string };
@@ -19,6 +20,11 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs = 
     el.append(c);
   }
   return el;
+}
+
+/** Replaces an element's children, skipping falsy entries like h() does. */
+export function fill(el: HTMLElement, ...children: (Child | Child[])[]): void {
+  el.replaceChildren(...children.flat().filter((c): c is Node | string => c !== null && c !== undefined && c !== false));
 }
 
 export function downloadBlob(blob: Blob, name: string): void {
@@ -131,6 +137,19 @@ export function numberInput(value: number, min: number, max: number, step: numbe
   return el;
 }
 
+/** Number input that reports only committed values (blur or Enter), for fields whose change rebuilds the UI. */
+export function numberField(value: number, min: number, max: number, step: number, onchange: (v: number) => void): HTMLInputElement {
+  const el = h('input', { type: 'number', value: String(value), min: String(min), max: String(max), step: String(step) });
+  el.addEventListener('change', () => {
+    const v = Number(el.value);
+    if (Number.isNaN(v)) return;
+    const c = Math.max(min, Math.min(max, v));
+    el.value = String(c);
+    onchange(c);
+  });
+  return el;
+}
+
 export function rangeInput(value: number, min: number, max: number, step: number, onchange: (v: number) => void): HTMLElement {
   const out = h('output', {}, String(value));
   const el = h('input', { type: 'range', value: String(value), min: String(min), max: String(max), step: String(step) });
@@ -153,4 +172,145 @@ export function select(value: string, options: [string, string][], onchange: (v:
   el.value = value;
   el.addEventListener('change', () => onchange(el.value));
   return el;
+}
+
+/** Collects unsubscribe callbacks so a panel can be torn down and rebuilt (e.g. on language change). */
+export class Scope {
+  private fns: (() => void)[] = [];
+  add(fn: () => void): void {
+    this.fns.push(fn);
+  }
+  dispose(): void {
+    this.fns.forEach((f) => f());
+    this.fns = [];
+  }
+}
+
+export interface MenuItem {
+  label: string;
+  icon?: string;
+  hint?: string;
+  action: () => void;
+}
+
+/** A button that opens a dropdown list of actions. */
+export function menuButton(content: string, items: () => MenuItem[], cls = 'btn'): HTMLElement {
+  const btn = h('button', { class: cls, html: content, 'aria-haspopup': 'menu' });
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.querySelectorAll('.menu-list').forEach((m) => m.remove());
+    const r = btn.getBoundingClientRect();
+    const list = h(
+      'div',
+      { class: 'menu-list', role: 'menu' },
+      ...items().map((it) =>
+        h(
+          'button',
+          {
+            role: 'menuitem',
+            onclick: () => {
+              list.remove();
+              it.action();
+            },
+            html: `${it.icon ?? ''}<span>${escapeHtml(it.label)}</span>${it.hint ? `<span class="hint">${escapeHtml(it.hint)}</span>` : ''}`,
+          },
+        ),
+      ),
+    );
+    list.style.left = `${Math.min(r.left, window.innerWidth - 220)}px`;
+    list.style.top = `${r.bottom + 4}px`;
+    document.body.append(list);
+    const close = (ev: Event) => {
+      if (ev.type === 'keydown' && (ev as KeyboardEvent).key !== 'Escape') return;
+      if (ev.type === 'mousedown' && list.contains(ev.target as Node)) return;
+      list.remove();
+      window.removeEventListener('mousedown', close, true);
+      window.removeEventListener('keydown', close, true);
+    };
+    setTimeout(() => {
+      window.addEventListener('mousedown', close, true);
+      window.addEventListener('keydown', close, true);
+    });
+  });
+  return btn;
+}
+
+export function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
+/** A collapsible sidebar section that remembers whether it was open. */
+export function section(id: string, title: string, iconHtml: string, defaultOpen: boolean, ...children: (Node | null | false)[]): HTMLDetailsElement {
+  const key = `spritestrack.section.${id}`;
+  let open = defaultOpen;
+  try {
+    const v = localStorage.getItem(key);
+    if (v !== null) open = v === '1';
+  } catch {
+    /* ignore */
+  }
+  const body = h('div', { class: 'body' }, ...children);
+  const d = h('details', { class: 'section' }, h('summary', { html: `${iconHtml}<span>${escapeHtml(title)}</span>` }), body);
+  d.open = open;
+  d.addEventListener('toggle', () => {
+    try {
+      localStorage.setItem(key, d.open ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  });
+  return d;
+}
+
+/** Simple prompt replacement that works in desktop webviews too. */
+export function askText(title: string, value: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    const input = h('input', { type: 'text', value });
+    const m = openModal(title, {
+      onClose: () => {
+        if (!done) resolve(null);
+      },
+    });
+    m.body.append(input);
+    const ok = () => {
+      done = true;
+      m.close();
+      resolve(input.value.trim() || null);
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') ok();
+    });
+    m.footer.append(h('button', { class: 'btn outline', onclick: () => m.close() }, t('cancel')), h('button', { class: 'btn primary', onclick: ok }, t('ok')));
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    });
+  });
+}
+
+export function confirmBox(text: string, okLabel: string, cancelLabel: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const m = openModal(text, {
+      onClose: () => {
+        if (!done) resolve(false);
+      },
+    });
+    m.footer.append(
+      h('button', { class: 'btn outline', onclick: () => m.close() }, cancelLabel),
+      h(
+        'button',
+        {
+          class: 'btn primary',
+          onclick: () => {
+            done = true;
+            m.close();
+            resolve(true);
+          },
+        },
+        okLabel,
+      ),
+    );
+  });
 }

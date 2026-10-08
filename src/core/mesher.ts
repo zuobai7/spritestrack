@@ -7,6 +7,8 @@ export interface MeshData {
   colorIndex: Uint8Array;
   /** Ambient occlusion factor per vertex (1 = fully lit). */
   ao: Float32Array;
+  /** Grid cell index of the voxel each vertex belongs to. */
+  cell: Uint32Array;
   indices: Uint32Array;
 }
 
@@ -43,6 +45,7 @@ export function buildCulledMesh(grid: VoxelGrid, opts: MeshOptions = {}): MeshDa
   const nor: number[] = [];
   const col: number[] = [];
   const aos: number[] = [];
+  const cells: number[] = [];
   const idx: number[] = [];
   const { sx, sy, sz } = grid;
   for (let y = 0; y < Math.min(sy, maxY + 1); y++)
@@ -59,6 +62,7 @@ export function buildCulledMesh(grid: VoxelGrid, opts: MeshOptions = {}): MeshDa
             pos.push(x + c[0], y + c[1], z + c[2]);
             nor.push(nx, ny, nz);
             col.push(v);
+            cells.push(grid.index(x, y, z));
             let ao = 3;
             if (useAo) {
               // Offsets towards this corner along the two tangent axes
@@ -92,6 +96,7 @@ export function buildCulledMesh(grid: VoxelGrid, opts: MeshOptions = {}): MeshDa
     normals: Float32Array.from(nor),
     colorIndex: Uint8Array.from(col),
     ao: Float32Array.from(aos),
+    cell: Uint32Array.from(cells),
     indices: Uint32Array.from(idx),
   };
 }
