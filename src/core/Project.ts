@@ -1,10 +1,17 @@
 import { VoxelGrid } from './VoxelGrid';
 import { makePalette } from './Palette';
+import type { Rig } from './rig';
 
 export interface Animation {
   name: string;
   fps: number;
   frames: VoxelGrid[];
+}
+
+/** A named palette. Voxels store palette indices, so swapping palettes recolors the whole model. */
+export interface PaletteVariant {
+  name: string;
+  palette: number[];
 }
 
 /**
@@ -18,21 +25,50 @@ export class Project {
   sx: number;
   sy: number;
   sz: number;
-  palette: number[];
   animations: Animation[];
+  /** All palettes (color schemes). `palette` is the active one. */
+  variants: PaletteVariant[];
+  activeVariant = 0;
+  /** Part-based skeletal animation setup, or null if the model isn't rigged. */
+  rig: Rig | null = null;
 
   constructor(sx = 16, sy = 16, sz = 16, name = 'untitled') {
     this.name = name;
     this.sx = sx;
     this.sy = sy;
     this.sz = sz;
-    this.palette = makePalette();
+    this.variants = [{ name: 'default', palette: makePalette() }];
     this.animations = [{ name: 'idle', fps: 8, frames: [new VoxelGrid(sx, sy, sz)] }];
   }
 
-  /** Resizes every frame of every animation. */
+  /** The active palette. Element i is the color of palette index i (element 0 unused). */
+  get palette(): number[] {
+    return this.variants[this.activeVariant].palette;
+  }
+
+  set palette(p: number[]) {
+    this.variants[this.activeVariant].palette = p;
+  }
+
+  /**
+   * Palette of variant `i`, with indices it lacks filled from the active
+   * palette, so every voxel index resolves to a color.
+   */
+  variantPalette(i: number): number[] {
+    const base = this.palette;
+    const v = this.variants[i]?.palette ?? base;
+    return base.map((c, k) => (k < v.length ? v[k] : c));
+  }
+
+  /** Resizes every frame of every animation (and the rig's part map). */
   resize(sx: number, sy: number, sz: number, anchor: 'corner' | 'center' = 'center'): void {
     for (const anim of this.animations) anim.frames = anim.frames.map((f) => f.resized(sx, sy, sz, anchor));
+    if (this.rig) {
+      const ox = anchor === 'center' ? Math.floor((sx - this.sx) / 2) : 0;
+      const oz = anchor === 'center' ? Math.floor((sz - this.sz) / 2) : 0;
+      this.rig.partMap = this.rig.partMap.resized(sx, sy, sz, anchor);
+      for (const p of this.rig.parts) p.pivot = [p.pivot[0] + ox, p.pivot[1], p.pivot[2] + oz];
+    }
     this.sx = sx;
     this.sy = sy;
     this.sz = sz;

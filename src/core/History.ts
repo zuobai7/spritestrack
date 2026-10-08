@@ -83,18 +83,24 @@ export class VoxelEdit {
     return this.changes.size;
   }
 
-  toCommand(label: string, after: () => void): Command | null {
+  /**
+   * Builds an undoable command. `resolve` returns the grid data at undo/redo
+   * time, so the command keeps working after structural undos swap frame
+   * objects (undo is LIFO, so the indices it captured are valid again).
+   */
+  toCommand(label: string, resolve: () => Uint8Array, after: () => void): Command | null {
     // Drop cells that ended up back at their original value
     const entries = [...this.changes].filter(([, [a, b]]) => a !== b);
     if (entries.length === 0) return null;
-    const data = this.data;
     return {
       label,
       undo() {
+        const data = resolve();
         for (const [i, [old]] of entries) data[i] = old;
         after();
       },
       redo() {
+        const data = resolve();
         for (const [i, [, v]] of entries) data[i] = v;
         after();
       },

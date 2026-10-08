@@ -1,5 +1,6 @@
 import { VoxelGrid } from './VoxelGrid';
 import { Project, type Animation } from './Project';
+import type { Rig, RigAnimation, RigPart } from './rig';
 
 /** Run-length encodes bytes as (count, value) pairs with count in 1..255. */
 export function rleEncode(data: Uint8Array): Uint8Array {
@@ -44,16 +45,25 @@ export function base64ToBytes(b64: string): Uint8Array {
 }
 
 export const FORMAT = 'spritestrack';
-export const FORMAT_VERSION = 1;
+export const FORMAT_VERSION = 2;
 
 interface ProjectJson {
   format: string;
   version: number;
   name: string;
   size: [number, number, number];
+  /** Active palette (kept for v1 readers). */
   palette: string[];
   animations: { name: string; fps: number; frames: string[] }[];
+  /** v2: all color schemes. */
+  variants?: { name: string; palette: string[] }[];
+  activeVariant?: number;
+  /** v2: skeletal rig. */
+  rig?: { parts: RigPart[]; partMap: string; animations: RigAnimation[]; source: { anim: number; frame: number } } | null;
 }
+
+const hexList = (pal: number[]) => pal.slice(1).map((c) => c.toString(16).padStart(6, '0'));
+const parseHexList = (list: string[]) => [0, ...list.map((h) => parseInt(h, 16) & 0xffffff)];
 
 export function serializeProject(p: Project): string {
   const json: ProjectJson = {
@@ -61,12 +71,22 @@ export function serializeProject(p: Project): string {
     version: FORMAT_VERSION,
     name: p.name,
     size: [p.sx, p.sy, p.sz],
-    palette: p.palette.slice(1).map((c) => c.toString(16).padStart(6, '0')),
+    palette: hexList(p.palette),
     animations: p.animations.map((a) => ({
       name: a.name,
       fps: a.fps,
       frames: a.frames.map((f) => bytesToBase64(rleEncode(f.data))),
     })),
+    variants: p.variants.map((v) => ({ name: v.name, palette: hexList(v.palette) })),
+    activeVariant: p.activeVariant,
+    rig: p.rig
+      ? {
+          parts: p.rig.parts,
+          partMap: bytesToBase64(rleEncode(p.rig.partMap.data)),
+          animations: p.rig.animations,
+          source: p.rig.source,
+        }
+      : null,
   };
   return JSON.stringify(json);
 }
@@ -77,7 +97,12 @@ export function deserializeProject(text: string): Project {
   if (json.version > FORMAT_VERSION) throw new Error(`Unsupported project version ${json.version}`);
   const [sx, sy, sz] = json.size;
   const p = new Project(sx, sy, sz, json.name);
-  p.palette = [0, ...json.palette.map((h) => parseInt(h, 16) & 0xffffff)];
+  if (json.variants && json.variants.length) {
+    p.variants = json.variants.map((v) => ({ name: v.name, palette: parseHexList(v.palette) }));
+    p.activeVariant = Math.max(0, Math.min(p.variants.length - 1, json.activeVariant ?? 0));
+  } else {
+    p.palette = parseHexList(json.palette);
+  }
   const n = sx * sy * sz;
   p.animations = json.animations.map(
     (a): Animation => ({
@@ -87,5 +112,14 @@ export function deserializeProject(text: string): Project {
     }),
   );
   if (p.animations.length === 0) p.animations.push({ name: 'idle', fps: 8, frames: [new VoxelGrid(sx, sy, sz)] });
+  if (json.rig) {
+    const rig: Rig = {
+      parts: json.rig.parts,
+      partMap: new VoxelGrid(sx, sy, sz, rleDecode(base64ToBytes(json.rig.partMap), n)),
+      animations: json.rig.animations,
+      source: json.rig.source ?? { anim: 0, frame: 0 },
+    };
+    p.rig = rig;
+  }
   return p;
 }

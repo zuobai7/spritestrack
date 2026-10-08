@@ -4,7 +4,18 @@ import { History, VoxelEdit } from '../src/core/History';
 import { createDemoProject, Project } from '../src/core/Project';
 import { deserializeProject, rleDecode, rleEncode, serializeProject } from '../src/core/serialize';
 import { raycastGrid, raycastPlaneY } from '../src/core/raycast';
-import { boxCells, floodCells, lineCells, mirrored, surfaceFillCells } from '../src/core/tools';
+import {
+  boxCells,
+  brushCells,
+  copyRegion,
+  flipRegion,
+  floodCells,
+  lineCells,
+  mirrored,
+  pasteRegion,
+  shrinkToContent,
+  surfaceFillCells,
+} from '../src/core/tools';
 import { buildCulledMesh, buildGreedyQuads } from '../src/core/mesher';
 
 describe('VoxelGrid', () => {
@@ -46,7 +57,7 @@ describe('History', () => {
     e.set(0, 3);
     e.set(1, 4);
     e.set(0, 5); // second write keeps original old value
-    h.push(e.toCommand('paint', () => {})!);
+    h.push(e.toCommand('paint', () => g.data, () => {})!);
     expect(g.data[0]).toBe(5);
     h.undo();
     expect(g.data[0]).toBe(0);
@@ -61,7 +72,7 @@ describe('History', () => {
     const e = new VoxelEdit(g.data);
     e.set(0, 2);
     e.set(0, 0);
-    expect(e.toCommand('x', () => {})).toBeNull();
+    expect(e.toCommand('x', () => g.data, () => {})).toBeNull();
   });
 });
 
@@ -170,5 +181,31 @@ describe('mesher', () => {
     g.set(0, 0, 0, 1);
     g.set(1, 0, 0, 2);
     expect(buildGreedyQuads(g)).toHaveLength(10);
+  });
+});
+
+
+describe('brush and selection helpers', () => {
+  it('builds cube, sphere and flat brushes', () => {
+    expect(brushCells([5, 5, 5], 1, 'cube')).toHaveLength(1);
+    expect(brushCells([5, 5, 5], 3, 'cube')).toHaveLength(27);
+    expect(brushCells([5, 5, 5], 3, 'sphere')).toHaveLength(19);
+    expect(brushCells([5, 5, 5], 3, 'cube', 1)).toHaveLength(9);
+    expect(brushCells([5, 5, 5], 2, 'cube')).toHaveLength(8);
+    expect(brushCells([5, 5, 5], 5, 'sphere', 1).every((c) => c[1] === 5)).toBe(true);
+  });
+
+  it('copies, pastes and flips regions', () => {
+    const g = new VoxelGrid(6, 6, 6);
+    g.set(1, 1, 1, 4);
+    g.set(2, 1, 1, 5);
+    const clip = copyRegion(g, { min: [1, 1, 1], max: [2, 1, 1] });
+    expect([clip.sx, clip.sy, clip.sz]).toEqual([2, 1, 1]);
+    pasteRegion(g, clip, [3, 4, 3]);
+    expect(g.get(3, 4, 3)).toBe(4);
+    expect(g.get(4, 4, 3)).toBe(5);
+    flipRegion(g, { min: [3, 4, 3], max: [4, 4, 3] }, 0);
+    expect(g.get(3, 4, 3)).toBe(5);
+    expect(shrinkToContent(g, { min: [0, 0, 0], max: [5, 5, 5] })).toEqual({ min: [1, 1, 1], max: [4, 4, 3] });
   });
 });

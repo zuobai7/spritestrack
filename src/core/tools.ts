@@ -1,4 +1,4 @@
-import type { VoxelGrid } from './VoxelGrid';
+import { VoxelGrid } from './VoxelGrid';
 import type { Vec3 } from './raycast';
 
 /** Returns the cell plus its mirror images for the enabled symmetry axes. */
@@ -105,4 +105,96 @@ export function surfaceFillCells(grid: VoxelGrid, start: Vec3, normal: Vec3): Ve
     for (const d of dirs) stack.push([c[0] + d[0], c[1] + d[1], c[2] + d[2]]);
   }
   return out;
+}
+
+export type BrushShape = 'cube' | 'sphere';
+
+/**
+ * Cells covered by a brush of `size` voxels (diameter) centered on `c`.
+ * With `flatAxis` set the brush is a 2D square/disc on that axis's plane
+ * (used when drawing on a single layer).
+ */
+export function brushCells(c: Vec3, size: number, shape: BrushShape, flatAxis: number | null = null): Vec3[] {
+  const n = Math.max(1, Math.floor(size));
+  if (n === 1) return [[c[0], c[1], c[2]]];
+  const lo = -Math.floor((n - 1) / 2);
+  const hi = Math.ceil((n - 1) / 2);
+  const mid = (lo + hi) / 2;
+  const r2 = (n / 2) * (n / 2) + 1e-6;
+  const out: Vec3[] = [];
+  const range = (a: number) => (flatAxis === a ? [0] : Array.from({ length: hi - lo + 1 }, (_, i) => lo + i));
+  for (const dy of range(1))
+    for (const dz of range(2))
+      for (const dx of range(0)) {
+        if (shape === 'sphere') {
+          const ex = flatAxis === 0 ? 0 : dx - mid;
+          const ey = flatAxis === 1 ? 0 : dy - mid;
+          const ez = flatAxis === 2 ? 0 : dz - mid;
+          if (ex * ex + ey * ey + ez * ez > r2) continue;
+        }
+        out.push([c[0] + dx, c[1] + dy, c[2] + dz]);
+      }
+  return out;
+}
+
+export interface Box {
+  min: Vec3;
+  max: Vec3;
+}
+
+export function normBox(a: Vec3, b: Vec3): Box {
+  return {
+    min: [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.min(a[2], b[2])],
+    max: [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.max(a[2], b[2])],
+  };
+}
+
+/** Clamps a box to the grid; returns null if nothing is left. */
+export function clampBox(grid: VoxelGrid, b: Box): Box | null {
+  const min: Vec3 = [Math.max(0, b.min[0]), Math.max(0, b.min[1]), Math.max(0, b.min[2])];
+  const max: Vec3 = [Math.min(grid.sx - 1, b.max[0]), Math.min(grid.sy - 1, b.max[1]), Math.min(grid.sz - 1, b.max[2])];
+  return min[0] > max[0] || min[1] > max[1] || min[2] > max[2] ? null : { min, max };
+}
+
+/** Copies a box out of a grid. */
+export function copyRegion(grid: VoxelGrid, b: Box): VoxelGrid {
+  const out = new VoxelGrid(b.max[0] - b.min[0] + 1, b.max[1] - b.min[1] + 1, b.max[2] - b.min[2] + 1);
+  for (let y = 0; y < out.sy; y++)
+    for (let z = 0; z < out.sz; z++)
+      for (let x = 0; x < out.sx; x++) out.data[out.index(x, y, z)] = grid.get(b.min[0] + x, b.min[1] + y, b.min[2] + z);
+  return out;
+}
+
+/** Writes the filled cells of `clip` into `grid` with its corner at `at`. */
+export function pasteRegion(grid: VoxelGrid, clip: VoxelGrid, at: Vec3): void {
+  for (let y = 0; y < clip.sy; y++)
+    for (let z = 0; z < clip.sz; z++)
+      for (let x = 0; x < clip.sx; x++) {
+        const v = clip.data[clip.index(x, y, z)];
+        if (v) grid.set(at[0] + x, at[1] + y, at[2] + z, v);
+      }
+}
+
+export function fillRegion(grid: VoxelGrid, b: Box, v: number): void {
+  for (let y = b.min[1]; y <= b.max[1]; y++)
+    for (let z = b.min[2]; z <= b.max[2]; z++) for (let x = b.min[0]; x <= b.max[0]; x++) grid.set(x, y, z, v);
+}
+
+/** Flips the content of a box in place. */
+export function flipRegion(grid: VoxelGrid, b: Box, axis: 0 | 1 | 2): void {
+  const clip = copyRegion(grid, b);
+  clip.flip(axis === 0 ? 'x' : axis === 1 ? 'y' : 'z');
+  fillRegion(grid, b, 0);
+  pasteRegion(grid, clip, b.min);
+}
+
+/** Tight box around the filled cells inside `b` (or null if empty). */
+export function shrinkToContent(grid: VoxelGrid, b: Box): Box | null {
+  const sub = copyRegion(grid, b);
+  const bb = sub.bounds();
+  if (!bb) return null;
+  return {
+    min: [b.min[0] + bb.min[0], b.min[1] + bb.min[1], b.min[2] + bb.min[2]],
+    max: [b.min[0] + bb.max[0], b.min[1] + bb.max[1], b.min[2] + bb.max[2]],
+  };
 }

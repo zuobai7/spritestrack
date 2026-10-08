@@ -94,3 +94,55 @@ describe('zip', () => {
     expect(dv.getUint32(zip.length - 22, true)).toBe(0x06054b50);
   });
 });
+
+describe('sprite lighting', () => {
+  it('changes shading with the view angle and casts ground shadows', async () => {
+    const { DEFAULT_LIGHT } = await import('../src/core/lighting');
+    const g = new VoxelGrid(6, 6, 6);
+    for (let y = 0; y < 6; y++) for (let z = 1; z < 5; z++) for (let x = 1; x < 5; x++) g.set(x, y, z, 20); // white pillar
+    const light = { ...DEFAULT_LIGHT, groundShadow: false };
+    const a = renderStack(g, palette, { angle: 0, light });
+    const b = renderStack(g, palette, { angle: 180, light });
+    expect(a.data).not.toEqual(b.data);
+    const noShadow = renderStack(g, palette, { angle: 0, light, padding: 8 });
+    const withShadow = renderStack(g, palette, { angle: 0, light: { ...light, groundShadow: true }, padding: 8 });
+    expect(opaque(withShadow)).toBeGreaterThan(opaque(noShadow));
+  });
+
+  it('shadows voxels under an overhang', async () => {
+    const { inShadow, lightDirection } = await import('../src/core/lighting');
+    const g = new VoxelGrid(5, 5, 5);
+    for (let x = 0; x < 5; x++) for (let z = 0; z < 5; z++) g.set(x, 4, z, 1); // roof
+    const l = lightDirection({ azimuth: 0, elevation: 80 }, 0);
+    expect(inShadow(g, [2.5, 0.5, 2.5], l)).toBe(true);
+    expect(inShadow(g, [2.5, 4.9 + 0.2, 2.5], l)).toBe(false);
+  });
+});
+
+describe('normal and depth passes', () => {
+  it('produces maps with the same footprint as the color pass', () => {
+    const g = cube();
+    const color = renderStack(g, palette, { angle: 30 });
+    const normal = renderStack(g, palette, { angle: 30, pass: 'normal' });
+    const depth = renderStack(g, palette, { angle: 30, pass: 'depth' });
+    const mask = (img: { data: Uint8ClampedArray }) => Array.from({ length: img.data.length / 4 }, (_, i) => img.data[i * 4 + 3] > 0);
+    expect(mask(normal)).toEqual(mask(color));
+    expect(mask(depth)).toEqual(mask(color));
+  });
+
+  it('encodes top faces as pointing up and towards the viewer', () => {
+    const g = new VoxelGrid(3, 1, 3);
+    g.set(1, 0, 1, 1);
+    const img = renderStack(g, palette, { pass: 'normal', spacing: 1, squash: 1 });
+    let found = false;
+    for (let i = 0; i < img.data.length; i += 4) {
+      if (!img.data[i + 3]) continue;
+      found = true;
+      // n = (0, .707, .707) → (128, 218, 218)
+      expect(img.data[i]).toBe(128);
+      expect(img.data[i + 1]).toBeGreaterThan(200);
+      expect(img.data[i + 2]).toBeGreaterThan(200);
+    }
+    expect(found).toBe(true);
+  });
+});
