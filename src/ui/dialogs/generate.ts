@@ -20,7 +20,7 @@ import type { GenFrameSpec } from '../../workers/genWorker';
 
 const KEY = 'spritestrack.generate.v1';
 const SCRIPT_ID = '__script__';
-const DOCS_URL = 'https://github.com/zuobai7/spritestrack/blob/main/docs/plugins.md';
+const DOCS_URL = 'https://github.com/zuobai7/spritestrack/blob/main/';
 
 interface GenState {
   id: string;
@@ -291,7 +291,8 @@ export function openGenerate(ed: Editor): void {
     }
   };
 
-  const pluginHint = h('p', { class: 'hint-text', html: `${t('pluginHint')} <a href="${DOCS_URL}" target="_blank" rel="noopener">docs/plugins.md</a>` });
+  const docs = loc({ zh: 'docs/plugins.md', en: 'docs/plugins.en.md' });
+  const pluginHint = h('p', { class: 'hint-text', html: `${t('pluginHint')} <a href="${DOCS_URL}${docs}" target="_blank" rel="noopener">${docs}</a>` });
   m.body.append(
     h(
       'div',

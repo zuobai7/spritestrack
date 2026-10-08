@@ -10,12 +10,15 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "tauri": "tauri",
+    "icons": "node scripts/make-icons.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.1",
     "@tauri-apps/plugin-dialog": "^2.8.1",
     "@tauri-apps/plugin-fs": "^2.6.0",
+    "@tauri-apps/plugin-opener": "^2.7.0",
     "three": "^0.186.1"
   },
   "devDependencies": {
@@ -24,5 +27,10 @@
     "typescript": "^5.9.3",
     "vite": "^7.3.0",
     "vitest": "^3.2.4"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zuobai7/spritestrack.git"
+  },
+  "homepage": "https://github.com/zuobai7/spritestrack"
 }

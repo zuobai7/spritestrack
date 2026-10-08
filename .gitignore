@@ -2,3 +2,7 @@ node_modules
 dist
 *.log
 .DS_Store
+
+# Mobile icons from `tauri icon` (no mobile targets)
+src-tauri/icons/android
+src-tauri/icons/ios

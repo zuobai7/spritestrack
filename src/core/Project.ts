@@ -100,7 +100,8 @@ export function createDemoProject(): Project {
         const dy = (y - 9.5) * 1.2;
         const dz = z - 7.5;
         const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (d < 4.6) g.set(x, y, z, d < 3.2 ? 14 : 13);
+        // Darker leaves inside; the flat top layer stays light so no dark patch shows
+        if (d < 4.6) g.set(x, y, z, d < 3.2 && y < 12 ? 14 : 13);
       }
   // A few apples
   g.set(4, 9, 7, 9);

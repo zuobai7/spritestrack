@@ -41,4 +41,12 @@ describe('procedural generators', () => {
     expect(c.count()).toBe(8);
     expect(pal[c.get(0, 0, 0)]).toBe(0x123456);
   });
+
+  it('fills whole voxels for fractional box corners', () => {
+    registerGenerator({ id: 'test-frac-box', name: 'Box', params: [], generate: (ctx) => ctx.box(0.5, 0, 0.5, 2.5, 0, 2.5, 1) });
+    const g = runGenerator(getGenerators().find((x) => x.id === 'test-frac-box')!, {}, [4, 4, 4], makePalette(), { seed: 1 });
+    expect(g.count()).toBe(9);
+    expect(g.get(0, 0, 0)).toBe(1);
+    expect(g.get(2, 0, 2)).toBe(1);
+  });
 });

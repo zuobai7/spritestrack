@@ -135,9 +135,11 @@ export function runGenerator(
     get: (x, y, z) => grid.get(Math.floor(x), Math.floor(y), Math.floor(z)),
     set: (x, y, z, c) => grid.set(Math.floor(x), Math.floor(y), Math.floor(z), c | 0),
     box(x0, y0, z0, x1, y1, z1, c) {
-      for (let y = Math.max(0, Math.min(y0, y1)); y <= Math.min(sy - 1, Math.max(y0, y1)); y++)
-        for (let z = Math.max(0, Math.min(z0, z1)); z <= Math.min(sz - 1, Math.max(z0, z1)); z++)
-          for (let x = Math.max(0, Math.min(x0, x1)); x <= Math.min(sx - 1, Math.max(x0, x1)); x++) grid.set(x, y, z, c);
+      // Corners are floored like set(), so fractional coordinates still fill whole voxels
+      const lo = (a: number, b: number) => Math.max(0, Math.floor(Math.min(a, b)));
+      const hi = (a: number, b: number, n: number) => Math.min(n - 1, Math.floor(Math.max(a, b)));
+      for (let y = lo(y0, y1); y <= hi(y0, y1, sy); y++)
+        for (let z = lo(z0, z1); z <= hi(z0, z1, sz); z++) for (let x = lo(x0, x1); x <= hi(x0, x1, sx); x++) grid.set(x, y, z, c | 0);
     },
     sphere(cx, cy, cz, rx, c, ry = rx, rz = rx) {
       for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++)
