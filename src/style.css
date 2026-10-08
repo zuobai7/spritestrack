@@ -384,6 +384,14 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+a {
+  color: var(--accent);
+}
+a.btn {
+  color: inherit;
+  text-decoration: none;
 }
 input[type='number'],
 input[type='text'],
@@ -400,6 +408,13 @@ textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   resize: vertical;
+}
+textarea.code {
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+  min-height: 280px;
+  line-height: 1.5;
 }
 input:focus,
 select:focus,
