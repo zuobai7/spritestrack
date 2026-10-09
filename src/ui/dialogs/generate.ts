@@ -40,6 +40,28 @@ function load(): GenState {
   }
 }
 
+/**
+ * Saved values merged over the defaults, with anything a generator no longer
+ * accepts (out of range, unknown option, wrong type) replaced by its default.
+ */
+function sanitizeParams(g: Generator, saved: ParamValues | undefined): ParamValues {
+  const out = defaultParams(g);
+  for (const d of g.params) {
+    const v = saved?.[d.key];
+    if (v === undefined) continue;
+    if (d.type === 'bool') out[d.key] = Boolean(v);
+    else if (d.type === 'color') {
+      if (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v)) out[d.key] = v;
+    } else if (d.type === 'select') {
+      if ((d.options ?? []).some((o) => o.value === v)) out[d.key] = v;
+    } else if (typeof v === 'number' && Number.isFinite(v)) {
+      const x = Math.max(d.min ?? -Infinity, Math.min(d.max ?? Infinity, v));
+      out[d.key] = d.type === 'int' ? Math.round(x) : x;
+    }
+  }
+  return out;
+}
+
 function frameSpecs(n: number, max = Infinity): GenFrameSpec[] {
   const count = Math.min(n, max);
   return Array.from({ length: count }, (_, i) => {
@@ -80,6 +102,8 @@ export function openGenerate(ed: Editor): void {
     wide: true,
     onClose: () => {
       clearInterval(timer);
+      if (pending !== null) clearTimeout(pending);
+      token++;
       unsub();
       runner.kill();
       try {
@@ -91,7 +115,16 @@ export function openGenerate(ed: Editor): void {
   });
 
   const gen = (): Generator | undefined => (st.id === SCRIPT_ID ? undefined : getGenerator(st.id));
-  const paramsOf = (g: Generator): ParamValues => (st.params[g.id] = { ...defaultParams(g), ...st.params[g.id] });
+  // Saved values are checked once per generator; after that the controls,
+  // the preview and Generate all share the same object
+  const checked = new Set<string>();
+  const paramsOf = (g: Generator): ParamValues => {
+    if (!checked.has(g.id) || !st.params[g.id]) {
+      checked.add(g.id);
+      st.params[g.id] = sanitizeParams(g, st.params[g.id]);
+    }
+    return st.params[g.id];
+  };
   const frameCount = () => (st.target === 'animation' ? Math.max(1, Math.min(120, Math.floor(st.frames))) : 1);
   const canAnimate = () => st.id === SCRIPT_ID || !!gen()?.animated;
 
@@ -170,7 +203,8 @@ export function openGenerate(ed: Editor): void {
       return inp;
     }
     if (d.type === 'select') return select(String(v), (d.options ?? []).map((o) => [o.value, loc(o.label)] as [string, string]), set);
-    return rangeInput(Number(v), d.min ?? 0, d.max ?? 100, d.step ?? (d.type === 'int' ? 1 : 0.01), set);
+    const format = d.percent ? (x: number) => `${Math.round(x * 100)}%` : (x: number) => String(Math.round(x * 1000) / 1000);
+    return rangeInput(Number(v), d.min ?? 0, d.max ?? 100, d.step ?? (d.type === 'int' ? 1 : 0.01), set, format);
   };
 
   const renderForm = () => {
@@ -276,11 +310,11 @@ export function openGenerate(ed: Editor): void {
     btn.disabled = true;
     try {
       const g = gen();
-      if (g) ed.generate(g, paramsOf(g), st.seed, st.target, st.frames);
+      if (g) ed.generate(g, paramsOf(g), st.seed, st.target, st.frames, loc(g.name));
       else {
         const n = frameCount();
         const res = await run(n > 1 ? frameSpecs(n) : [{ t: 0, frame: 0, frameCount: 1 }], 5000 + 400 * n);
-        ed.applyGenerated(res.grids, res.palette, st.target, 'script');
+        ed.applyGenerated(res.grids, res.palette, st.target, t('customScript'));
       }
       toast(t('generated'));
       m.close();

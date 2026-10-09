@@ -19,7 +19,7 @@
       "action": "./",
       "accept": {
         "application/x-spritestrack": [".sstrack"],
-        "application/octet-stream": [".vox"]
+        "application/octet-stream": [".vox", ".schem", ".schematic"]
       }
     }
   ]

@@ -9,6 +9,8 @@ import type { RgbaImage } from './image';
 export interface GifOptions {
   /** Delay per frame in milliseconds. */
   delay: number;
+  /** Optional delay for each frame (milliseconds), overriding `delay`. */
+  delays?: number[];
   /** Background for semi-transparent pixels, or null to keep transparency (alpha is dithered). */
   background: number | null;
   /** 0 = loop forever. */
@@ -228,13 +230,13 @@ export function encodeGif(frames: RgbaImage[], opts: GifOptions): Uint8Array {
     W.u16(opts.loops ?? 0);
     W.u8(0);
   }
-  const delay = Math.max(2, Math.round(opts.delay / 10));
-  for (const f of flat) {
+  const delayOf = (i: number) => Math.max(2, Math.round((opts.delays?.[i] ?? opts.delay) / 10));
+  for (const [fi, f] of flat.entries()) {
     W.u8(0x21);
     W.u8(0xf9);
     W.u8(4);
     W.u8((2 << 2) | (transparent ? 1 : 0)); // dispose: restore to background
-    W.u16(delay);
+    W.u16(delayOf(fi));
     W.u8(transparent ? transIndex : 0);
     W.u8(0);
     W.u8(0x2c);

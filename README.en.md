@@ -19,6 +19,7 @@
 
 - 3D mode and layer mode: in layer mode you draw one slice at a time like pixel art, with the layers above shown as a faint ghost
 - Tools: add, erase, paint, pick, fill, box, line, select, part; brush size 1–16, cube or sphere; X / Y / Z mirroring
+- Edit preview: hovering the model highlights the voxels a fill, paint or erase would change (mirrored parts included); fill says how many voxels it will recolor and the eyedropper shows the color it will pick
 - Selection: drag a box or click a connected object; copy, cut, paste, move, flip, fill, paint
 - Reference images on the front, side or top plane with opacity, size and offset; in layer mode they can follow the current layer for tracing
 - Palette of up to 255 colors; import .hex / .gpl / image palettes, export .hex / .gpl / PNG; several color schemes you can switch with one click
@@ -40,11 +41,13 @@
 
 - Images to voxels: slice strips (sprite-stack sheets), extruded pixel art, heightmap terrain
 - MagicaVoxel `.vox`; several models can become animation frames
+- Minecraft structures: `.schem` files from WorldEdit and similar tools, and older MCEdit / Schematica `.schematic` files; every block becomes the closest palette color (or its own color is added to the palette), large structures can be scaled down, water and lava are optional
 - `.sstrack` project files; drop them on the window to open
 
 **Export**
 
-- Sprites: slice stacking (pixel exact), 3D render (lit, adjustable elevation, orthographic or perspective), raw slice strips
+- Sprites: slice stacking (pixel exact), 3D render (lit, orthographic or perspective), raw slice strips
+- The view angle runs from 0 to 180: 90 is a level view, 180 looks straight down, below 90 looks up from underneath (3D render only); 135 is the classic sprite-stack view
 - 1–32 angles, pixel scaling, outline, automatic trimming
 - Sprite sheet PNG + JSON (the JSON-hash format Phaser and PixiJS read), one PNG per frame in a ZIP, animated GIF (the animation or a 360° turntable)
 - Normal and depth maps aligned pixel for pixel with the colors, for 2D dynamic lighting
@@ -95,7 +98,7 @@ npm run tauri build   # build installers
 
 | Folder | Contents |
 | --- | --- |
-| `src/core` | Voxel grid, palette, project, undo, meshing, lighting, procedural generation, skeletal animation, image import |
+| `src/core` | Voxel grid, palette, project, undo, meshing, lighting, procedural generation, skeletal animation, image import, Minecraft structure (NBT) reading |
 | `src/editor` | Editor state and every edit operation (all undoable) |
 | `src/render` | Three.js 3D viewport |
 | `src/export` | Sprite-stack renderer, 3D renderer, sprite sheets, GIF, OBJ, GLB, VOX, ZIP |

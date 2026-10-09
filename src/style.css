@@ -283,6 +283,61 @@ textarea {
   color: var(--muted);
   font-size: 11px;
 }
+.mc-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.mc-block {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto 16px;
+  align-items: center;
+  gap: 6px;
+}
+.mc-block .swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+.mc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mc-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.mc-arrow {
+  color: var(--muted);
+}
+.view-tip {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(29, 30, 37, 0.92);
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.view-tip[hidden] {
+  display: none;
+}
+.view-tip .swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
 .chip {
   display: inline-flex;
   align-items: center;
@@ -812,4 +867,24 @@ input[type='color'] {
   .two-col {
     grid-template-columns: 1fr;
   }
+}
+
+.startup-error {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  max-width: 560px;
+  margin: 12vh auto 0;
+  padding: 0 16px;
+  color: var(--text);
+}
+.startup-error h1 {
+  font-size: 20px;
+  margin: 0 0 12px;
+}
+.startup-error code {
+  display: block;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-word;
 }

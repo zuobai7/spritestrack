@@ -91,9 +91,13 @@ export function raycastPlaneY(grid: VoxelGrid, origin: Vec3, dir: Vec3, planeY: 
   return [x, Math.floor(planeY), z];
 }
 
-/** Intersects a ray with an axis-aligned plane (`axis` = 0/1/2, at coordinate `level` + 0.5 cell center). */
-export function raycastAxisPlane(grid: VoxelGrid, origin: Vec3, dir: Vec3, axis: number, level: number): Vec3 | null {
-  const plane = level + 0.5;
+/**
+ * Intersects a ray with the axis-aligned plane at coordinate `plane` on `axis`
+ * (0/1/2) and returns the cell there whose coordinate on that axis is `level`.
+ * Drags pass the plane of the face they started on, so the cell under the
+ * pointer doesn't jump when the drag begins.
+ */
+export function raycastAxisPlane(grid: VoxelGrid, origin: Vec3, dir: Vec3, axis: number, level: number, plane = level + 0.5): Vec3 | null {
   if (Math.abs(dir[axis]) < 1e-9) return null;
   const t = (plane - origin[axis]) / dir[axis];
   if (t <= 0) return null;

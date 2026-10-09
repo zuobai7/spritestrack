@@ -29,7 +29,10 @@ export function mountTimeline(el: HTMLElement, ed: Editor, scope: Scope, openRig
   animSelect.addEventListener('change', () => ed.selectFrame(Number(animSelect.value), 0));
   const playBtn = h('button', { class: 'icon-btn', onclick: () => ed.togglePlay() });
   const fps = h('input', { type: 'number', min: '1', max: '60', step: '1', title: t('fps') });
-  fps.addEventListener('change', () => ed.setFps(Number(fps.value)));
+  fps.addEventListener('change', () => {
+    ed.setFps(Number(fps.value));
+    fps.value = String(ed.anim.fps);
+  });
   const onion = h('button', { class: 'btn', onclick: () => ed.setView({ onion: !ed.onion }) }, t('onion'));
   const frames = h('div', { class: 'frames' });
   const btn = (name: string, title: string, fn: () => void) => h('button', { class: 'icon-btn', title, 'aria-label': title, html: icon(name), onclick: fn });
@@ -72,13 +75,16 @@ export function mountTimeline(el: HTMLElement, ed: Editor, scope: Scope, openRig
   const renderBar = () => {
     animSelect.replaceChildren(...ed.project.animations.map((a, i) => h('option', { value: String(i) }, `${a.name} (${a.frames.length})`)));
     animSelect.value = String(ed.animIndex);
-    fps.value = String(ed.anim.fps);
+    if (document.activeElement !== fps) fps.value = String(ed.anim.fps);
     playBtn.innerHTML = icon(ed.playing ? 'pause' : 'play');
     playBtn.title = ed.playing ? t('pause') : t('play');
     onion.classList.toggle('on', ed.onion);
   };
 
+  // Animation the thumbnails show
+  let shownAnim = -1;
   const renderFrames = () => {
+    shownAnim = ed.animIndex;
     const pk = paletteHash(ed.project.palette);
     frames.replaceChildren(
       ...ed.anim.frames.map((g, i) =>
@@ -113,7 +119,7 @@ export function mountTimeline(el: HTMLElement, ed: Editor, scope: Scope, openRig
   const onFrame = () => {
     renderBar();
     frames.querySelectorAll('.frame').forEach((f, i) => f.classList.toggle('on', i === ed.frameIndex));
-    if (ed.anim.frames.length + 1 !== frames.children.length) renderFrames();
+    if (ed.animIndex !== shownAnim || ed.anim.frames.length + 1 !== frames.children.length) renderFrames();
     (frames.children[ed.frameIndex] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   };
 

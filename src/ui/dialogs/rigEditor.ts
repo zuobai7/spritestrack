@@ -155,10 +155,11 @@ export function openRigEditor(ed: Editor): void {
 
   for (let axis = 0; axis < 3; axis++) {
     rotRanges.push(
+      // ±360 so a full turn (the spin template's keys) fits on the slider
       liveRange(
         0,
-        -180,
-        180,
+        -360,
+        360,
         1,
         (v) => editPose((rot) => (rot[axis] = v), true),
         () => ed.commitLive('pose'),
@@ -282,7 +283,18 @@ export function openRigEditor(ed: Editor): void {
           }),
       ),
       a && h('div', { class: 'group-title' }, t('settings')),
-      a && row(t('length'), numberField(a.length, 1, 120, 1, (v) => ed.editRigAnimation(ai, (x) => (x.length = Math.round(v))))),
+      a &&
+        row(
+          t('length'),
+          numberField(a.length, 1, 120, 1, (v) =>
+            ed.editRigAnimation(ai, (x) => {
+              x.length = Math.max(1, Math.round(v));
+              // A shorter animation drops the keys past its new end
+              for (const tr of x.tracks) tr.keys = tr.keys.filter((k) => k.frame < x.length);
+              x.tracks = x.tracks.filter((tr) => tr.keys.length > 0);
+            }),
+          ),
+        ),
       a &&
         row(
           t('fps'),

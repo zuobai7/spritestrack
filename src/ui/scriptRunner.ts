@@ -6,7 +6,8 @@ export class ScriptTimeoutError extends Error {}
 
 /**
  * Runs generator scripts in a worker. A run that takes longer than
- * `timeoutMs` kills the worker (an endless loop can't block the editor).
+ * `timeoutMs` kills the worker (an endless loop can't block the editor), and
+ * starting a run cancels any earlier one that hasn't finished.
  */
 export class ScriptRunner {
   private worker: Worker | null = null;
@@ -41,6 +42,10 @@ export class ScriptRunner {
       timeoutMs?: number;
     },
   ): Promise<{ grids: VoxelGrid[]; palette: number[] }> {
+    // Only the newest run matters. An older one still running (maybe stuck in
+    // an endless loop the user just fixed) is cancelled instead of making
+    // this one wait behind it and then time out with it.
+    if (this.pending.size) this.kill();
     const w = this.ensure();
     const id = this.nextId++;
     const req: GenRequest = {

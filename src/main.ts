@@ -2,8 +2,26 @@ import './style.css';
 import { App, exposeApi } from './ui/App';
 import { isTauri } from './ui/files';
 import { openAnyFile } from './ui/dialogs/project';
+import { t } from './i18n';
 
-const app = new App(document.getElementById('app')!);
+const root = document.getElementById('app')!;
+let app: App;
+try {
+  app = new App(root);
+} catch (e) {
+  // Usually a browser or graphics driver without WebGL: say so instead of showing empty panels
+  const box = document.createElement('div');
+  box.className = 'startup-error';
+  const title = document.createElement('h1');
+  title.textContent = t('startupError');
+  const detail = document.createElement('p');
+  detail.textContent = t('webglHint');
+  const raw = document.createElement('code');
+  raw.textContent = (e as Error).message;
+  box.append(title, detail, raw);
+  root.replaceChildren(box);
+  throw e;
+}
 exposeApi(app);
 
 // Offline support: the service worker caches the app after the first visit.

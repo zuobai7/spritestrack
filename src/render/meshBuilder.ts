@@ -91,9 +91,10 @@ export function greedyGeometry(grid: VoxelGrid, palette: number[], scale = 1, ce
       nor[o] = q.normal[0];
       nor[o + 1] = q.normal[1];
       nor[o + 2] = q.normal[2];
-      col[o] = lin[q.color * 3];
-      col[o + 1] = lin[q.color * 3 + 1];
-      col[o + 2] = lin[q.color * 3 + 2];
+      // Indices past the palette's end show magenta, like everywhere else
+      col[o] = lin[q.color * 3] ?? 1;
+      col[o + 1] = lin[q.color * 3 + 1] ?? 0;
+      col[o + 2] = lin[q.color * 3 + 2] ?? 1;
     });
     const b = i * 4;
     idx.set([b, b + 1, b + 2, b, b + 2, b + 3], i * 6);

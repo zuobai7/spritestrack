@@ -58,7 +58,7 @@ SpriteStrack.registerGenerator({
 | `color` | 取色器 | `'#rrggbb'` 字符串 |
 | `select` | 下拉框，`options: [{ value, label }]` | 选中项的 `value` |
 
-`label` 和 `options[].label` 都可以写成 `{ zh, en }`，会跟着界面语言切换。
+`label` 和 `options[].label` 都可以写成 `{ zh, en }`，会跟着界面语言切换。`number` 参数加上 `percent: true` 时，0–1 的值会显示成百分比，适合“占模型大小的比例”这类参数。
 
 ### `ctx` 接口
 

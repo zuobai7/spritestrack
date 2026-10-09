@@ -1,6 +1,6 @@
 import type { Project } from '../core/Project';
 import type { VoxelGrid } from '../core/VoxelGrid';
-import type { LightSettings } from '../core/lighting';
+import { shadowReach, type LightSettings } from '../core/lighting';
 import { renderSlices, renderStack, type RenderPass } from './stackRenderer';
 import { packSheet, scaleImage, trimCommon, type RgbaImage, type SheetFrame } from './image';
 
@@ -9,10 +9,11 @@ export interface SpriteSettings {
   method: 'stack' | '3d' | 'slices';
   angles: number;
   startAngle: number;
+  /** Layer thickness of the sprite stack (1 = one pixel per layer at a 45° view). */
   spacing: number;
-  squash: number;
+  /** View angle on the 0–180 scale shown in the dialog, see `viewElevation`. */
+  view: number;
   size: number;
-  elevation: number;
   ortho: boolean;
   scale: number;
   outline: boolean;
@@ -37,9 +38,8 @@ export const DEFAULT_SPRITE_SETTINGS: SpriteSettings = {
   angles: 8,
   startAngle: 0,
   spacing: 1,
-  squash: 1,
+  view: 135,
   size: 64,
-  elevation: 35,
   ortho: true,
   scale: 2,
   outline: false,
@@ -60,6 +60,7 @@ export const DEFAULT_SPRITE_SETTINGS: SpriteSettings = {
 };
 
 export interface FrameRef {
+  /** Animation name, made unique within the export (names key rows, files and JSON frames). */
   anim: string;
   index: number;
   fps: number;
@@ -73,8 +74,23 @@ export function framesFor(p: Project, s: SpriteSettings, animIndex: number, fram
     const a = p.animations[animIndex];
     return [{ anim: a.name, index: frameIndex, fps: a.fps, grid: a.frames[frameIndex] }];
   }
-  const anims = s.scope === 'anim' ? [p.animations[animIndex]] : p.animations;
-  return anims.flatMap((a) => a.frames.map((grid, index) => ({ anim: a.name, index, fps: a.fps, grid })));
+  if (s.scope === 'anim') {
+    const a = p.animations[animIndex];
+    return a.frames.map((grid, index) => ({ anim: a.name, index, fps: a.fps, grid }));
+  }
+  const names = uniqueNames(p.animations.map((a) => a.name));
+  return p.animations.flatMap((a, ai) => a.frames.map((grid, index) => ({ anim: names[ai], index, fps: a.fps, grid })));
+}
+
+/** Names with repeats numbered ("walk", "walk 2"), so they can serve as keys. */
+export function uniqueNames(names: string[]): string[] {
+  const out: string[] = [];
+  for (const n of names) {
+    let name = n || 'anim';
+    for (let i = 2; out.includes(name); i++) name = `${n || 'anim'} ${i}`;
+    out.push(name);
+  }
+  return out;
 }
 
 export function anglesFor(s: SpriteSettings): number[] {
@@ -99,6 +115,31 @@ export function schemesFor(p: Project, s: SpriteSettings): { name: string; palet
 
 const hex = (s: string) => parseInt(s.replace('#', ''), 16) & 0xffffff;
 
+/** A name usable as a file or folder name on every system. */
+const fileSafe = (name: string) => name.replace(/[\\/:*?"<>|]+/g, '_').trim() || '_';
+
+/**
+ * Camera elevation in degrees (-90 looks up from straight below, 0 is level,
+ * 90 looks straight down) for a view angle on the dialog's 0–180 scale.
+ */
+export function viewElevation(view: number): number {
+  return Math.max(-90, Math.min(90, view - 90));
+}
+
+/** View angles the sprite-stack method can draw: it has to look down onto the layers. */
+export const STACK_VIEW_RANGE: [number, number] = [105, 180];
+
+/**
+ * Ground squash and layer spacing (pixels per layer) of a sprite stack seen
+ * from `elevation` degrees above. The larger of the two stays one pixel per
+ * voxel, so 45° gives the classic look (1 and 1) and 90° is straight top-down.
+ */
+export function stackProjection(elevation: number, thickness = 1): { squash: number; spacing: number } {
+  const e = (Math.max(1, Math.min(90, elevation)) * Math.PI) / 180;
+  const k = 1 / Math.max(Math.sin(e), Math.cos(e));
+  return { squash: Math.sin(e) * k, spacing: Math.cos(e) * k * thickness };
+}
+
 /** Renders one cell at 1x (scaling happens after trimming). */
 export function renderCell(
   grid: VoxelGrid,
@@ -111,15 +152,18 @@ export function renderCell(
 ): RgbaImage {
   if (s.method === 'slices') return renderSlices(grid, palette, s.sliceDir, 1);
   if (s.method === '3d' && render3d) return render3d(grid, palette, angle, pass);
+  const view = Math.max(STACK_VIEW_RANGE[0], Math.min(STACK_VIEW_RANGE[1], s.view));
+  const { squash, spacing } = stackProjection(viewElevation(view), s.spacing);
   return renderStack(grid, palette, {
     angle,
-    spacing: s.spacing,
-    squash: s.squash,
+    spacing,
+    squash,
     scale: 1,
     outline: s.outline ? hex(s.outlineColor) : null,
     light: s.useLight ? light : null,
     shading: true,
-    padding: s.useLight && light.groundShadow ? Math.ceil(grid.sy / 2) : 1,
+    // Room for the whole ground shadow; trimming removes what's left over
+    padding: s.useLight ? Math.max(1, Math.ceil(shadowReach(grid.sy, light))) : 1,
     pass,
   });
 }
@@ -129,8 +173,8 @@ export interface ExportFile {
   name: string;
   image?: RgbaImage;
   text?: string;
-  /** GIF frames + delay, encoded by the caller. */
-  gif?: { frames: RgbaImage[]; delay: number };
+  /** GIF frames + delay (or one delay per frame), encoded by the caller. */
+  gif?: { frames: RgbaImage[]; delay: number; delays?: number[] };
 }
 
 export interface SheetResult {
@@ -161,6 +205,8 @@ export async function buildSprites(
   const passes = passesFor(s);
   const schemes = schemesFor(p, s);
   const limit = opts.limit ?? Infinity;
+  // A slice strip must keep equal slices, so it is never trimmed
+  const trim = s.trim && s.method !== 'slices';
   const files: ExportFile[] = [];
   let done = 0;
   const total = frames.length * angles.length * passes.length * schemes.length;
@@ -174,8 +220,12 @@ export async function buildSprites(
 
   if (s.output === 'gif') {
     const turntable = s.gifContent === 'turntable';
-    const seq = turntable ? angles.map((a) => ({ grid: frames[0].grid, angle: a })) : frames.map((f) => ({ grid: f.grid, angle: s.startAngle }));
+    const seq = turntable
+      ? angles.map((a) => ({ grid: frames[0].grid, angle: a, fps: 0 }))
+      : frames.map((f) => ({ grid: f.grid, angle: s.startAngle, fps: f.fps }));
     const delay = turntable ? s.gifDelay : Math.round(1000 / Math.max(1, frames[0]?.fps ?? 8));
+    // Each animation plays at its own frame rate
+    const delays = turntable ? undefined : seq.map((q) => Math.round(1000 / Math.max(1, q.fps)));
     let preview: RgbaImage[] = [];
     for (const sc of schemes) {
       const imgs: RgbaImage[] = [];
@@ -183,9 +233,9 @@ export async function buildSprites(
         imgs.push(renderCell(q.grid, sc.palette, q.angle, 'color', s, light, render3d));
         await tick();
       }
-      const out = (s.trim ? trimCommon(imgs, 1) : imgs).map((im) => scaleImage(im, s.scale));
+      const out = (trim ? trimCommon(imgs, 1) : imgs).map((im) => scaleImage(im, s.scale));
       if (!preview.length) preview = out;
-      files.push({ name: `${opts.baseName}${sc.name ? `_${sc.name}` : ''}.gif`, gif: { frames: out, delay } });
+      files.push({ name: `${opts.baseName}${sc.name ? `_${sc.name}` : ''}.gif`, gif: { frames: out, delay, delays } });
     }
     return { files, preview: preview[0] ?? null, previewFrames: preview, previewDelay: delay, cellCount: seq.length };
   }
@@ -206,7 +256,7 @@ export async function buildSprites(
           await tick();
         }
     }
-  const trimmed = s.trim ? trimCommon(cells.map((c) => c.image), 1) : cells.map((c) => c.image);
+  const trimmed = trim ? trimCommon(cells.map((c) => c.image), 1) : cells.map((c) => c.image);
   trimmed.forEach((img, i) => (cells[i].image = scaleImage(img, s.scale)));
 
   const variants: { scheme: number; pass: RenderPass; suffix: string }[] = [];
@@ -220,24 +270,26 @@ export async function buildSprites(
   for (const v of variants) {
     const mine = cells.filter((c) => c.scheme === v.scheme && c.pass === v.pass);
     if (s.output === 'zip') {
-      for (const c of mine) files.push({ name: `${c.frame.anim}/${frameName(c.frame, c.angleIndex)}${v.suffix}.png`, image: c.image });
+      for (const c of mine) files.push({ name: `${fileSafe(c.frame.anim)}/${fileSafe(frameName(c.frame, c.angleIndex))}${v.suffix}.png`, image: c.image });
       if (!preview) preview = packSheet(rowsOf(mine)).image;
       continue;
     }
-    const { image, frames: rects } = packSheet(rowsOf(mine));
+    const rows = rowsOf(mine);
+    const { image, frames: rects } = packSheet(rows);
     if (!preview) preview = image;
     const png = `${opts.baseName}${v.suffix}.png`;
     files.push({ name: png, image });
-    if (s.json && v.pass === 'color') files.push({ name: `${opts.baseName}${v.suffix}.json`, text: sheetJson(png, image, rects, mine, frameName, angles, s) });
+    const placed = rows.flatMap((r) => r.cells);
+    if (s.json && v.pass === 'color') files.push({ name: `${opts.baseName}${v.suffix}.json`, text: sheetJson(png, image, rects, placed, frameName, angles, s) });
   }
   return { files, preview, cellCount: count };
 
   function rowsOf(list: Cell[]) {
-    const rows: { name: string; images: RgbaImage[]; cells: Cell[] }[] = [];
+    // One row per frame (all its angles)
+    const rows: { name: string; frame: FrameRef; images: RgbaImage[]; cells: Cell[] }[] = [];
     for (const c of list) {
-      const key = `${c.frame.anim}_${c.frame.index}`;
-      let r = rows.find((x) => x.name === key);
-      if (!r) rows.push((r = { name: key, images: [], cells: [] }));
+      let r = rows.find((x) => x.frame === c.frame);
+      if (!r) rows.push((r = { name: `${c.frame.anim}_${c.frame.index}`, frame: c.frame, images: [], cells: [] }));
       r.images.push(c.image);
       r.cells.push(c);
     }

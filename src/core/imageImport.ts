@@ -43,13 +43,16 @@ function pixel(img: RgbaImage, x: number, y: number): { color: number; alpha: nu
 export function fitImage(img: RgbaImage, max: number): RgbaImage {
   const s = Math.min(1, max / img.width, max / img.height);
   if (s >= 1) return img;
-  const w = Math.max(1, Math.floor(img.width * s));
-  const h = Math.max(1, Math.floor(img.height * s));
+  return resizeImage(img, Math.max(1, Math.floor(img.width * s)), Math.max(1, Math.floor(img.height * s)));
+}
+
+/** Nearest-neighbor resize to exactly `w`×`h` pixels. */
+export function resizeImage(img: RgbaImage, w: number, h: number): RgbaImage {
   const out: RgbaImage = { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) };
   for (let y = 0; y < h; y++)
     for (let x = 0; x < w; x++) {
-      const sx = Math.min(img.width - 1, Math.floor((x + 0.5) / s));
-      const sy = Math.min(img.height - 1, Math.floor((y + 0.5) / s));
+      const sx = Math.min(img.width - 1, Math.floor(((x + 0.5) * img.width) / w));
+      const sy = Math.min(img.height - 1, Math.floor(((y + 0.5) * img.height) / h));
       out.data.set(img.data.subarray((sy * img.width + sx) * 4, (sy * img.width + sx) * 4 + 4), (y * w + x) * 4);
     }
   return out;

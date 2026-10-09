@@ -1,11 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import { createDemoProject } from '../src/core/Project';
 import { DEFAULT_LIGHT } from '../src/core/lighting';
-import { buildSprites, DEFAULT_SPRITE_SETTINGS } from '../src/export/spriteExport';
+import { buildSprites, DEFAULT_SPRITE_SETTINGS, stackProjection, viewElevation } from '../src/export/spriteExport';
 
 const p = createDemoProject();
 
 describe('sprite export pipeline', () => {
+  it('maps the 0–180 view angle to camera elevation and stack projection', () => {
+    expect(viewElevation(0)).toBe(-90);
+    expect(viewElevation(90)).toBe(0);
+    expect(viewElevation(180)).toBe(90);
+    const classic = stackProjection(viewElevation(135));
+    expect(classic.squash).toBeCloseTo(1);
+    expect(classic.spacing).toBeCloseTo(1);
+    const top = stackProjection(viewElevation(180));
+    expect(top.squash).toBeCloseTo(1);
+    expect(top.spacing).toBeCloseTo(0);
+    const low = stackProjection(viewElevation(105), 2);
+    expect(low.squash).toBeCloseTo(Math.tan((15 * Math.PI) / 180));
+    expect(low.spacing).toBeCloseTo(2);
+  });
+
   it('builds a sheet with JSON for every frame and angle', async () => {
     const s = { ...DEFAULT_SPRITE_SETTINGS, scope: 'anim' as const, angles: 4, scale: 1 };
     const r = await buildSprites(p, s, DEFAULT_LIGHT, 1, 0, null, { baseName: 'demo' });

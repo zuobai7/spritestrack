@@ -74,6 +74,42 @@ export function floodCells(grid: VoxelGrid, start: Vec3, layerOnly: boolean, lim
 }
 
 /**
+ * Cells 6-connected to `start` whose value passes `inside`, as a mask over
+ * the grid's cells (1 = part of the area). Unlike `floodCells` it has no size
+ * limit, so it suits whole-model operations on large grids.
+ */
+export function floodMask(grid: VoxelGrid, start: Vec3, inside: (v: number) => boolean): Uint8Array {
+  const mask = new Uint8Array(grid.data.length);
+  if (!grid.inBounds(start[0], start[1], start[2])) return mask;
+  const first = grid.index(start[0], start[1], start[2]);
+  if (!inside(grid.data[first])) return mask;
+  const { sx, sy, sz } = grid;
+  const row = sx;
+  const layer = sx * sz;
+  const stack = [first];
+  mask[first] = 1;
+  const visit = (i: number) => {
+    if (!mask[i] && inside(grid.data[i])) {
+      mask[i] = 1;
+      stack.push(i);
+    }
+  };
+  while (stack.length) {
+    const i = stack.pop()!;
+    const x = i % sx;
+    const z = Math.floor(i / row) % sz;
+    const y = Math.floor(i / layer);
+    if (x > 0) visit(i - 1);
+    if (x < sx - 1) visit(i + 1);
+    if (z > 0) visit(i - row);
+    if (z < sz - 1) visit(i + row);
+    if (y > 0) visit(i - layer);
+    if (y < sy - 1) visit(i + layer);
+  }
+  return mask;
+}
+
+/**
  * Surface fill: recolors the connected region of same-colored voxels that are
  * visible from the same side as the clicked face (like a paint bucket on the
  * model's surface).

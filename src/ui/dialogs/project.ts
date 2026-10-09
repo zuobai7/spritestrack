@@ -9,6 +9,7 @@ import { confirmBox, fill, h, numberField, openModal, pickFile, row, select, toa
 import { PROJECT_EXT } from '../files';
 import { icon } from '../icons';
 import { openImageImport } from './importImage';
+import { openMinecraftImport } from './importMinecraft';
 
 export const REPO_URL = 'https://github.com/zuobai7/spritestrack';
 
@@ -76,14 +77,19 @@ export function openNewProject(ed: Editor): void {
   render();
 }
 
-/** Opens a project, a MagicaVoxel model or an image (which goes to the image import dialog). */
+/**
+ * Opens a project, a MagicaVoxel model, a Minecraft structure or an image
+ * (models, structures and images go to their import dialogs).
+ */
 export async function openAnyFile(ed: Editor, file?: File | null): Promise<void> {
-  file ??= await pickFile(`.${PROJECT_EXT},.json,.vox,image/png,image/gif,image/jpeg,image/webp`);
+  file ??= await pickFile(`.${PROJECT_EXT},.json,.vox,.schem,.schematic,image/png,image/gif,image/jpeg,image/webp`);
   if (!file) return;
   const lower = file.name.toLowerCase();
   try {
     if (lower.endsWith('.vox')) return await importVoxFile(ed, file);
+    if (lower.endsWith('.schem') || lower.endsWith('.schematic')) return await openMinecraftImport(ed, file);
     if (file.type.startsWith('image/') || /\.(png|gif|jpe?g|webp|bmp)$/.test(lower)) return await openImageImport(ed, file);
+    if (!lower.endsWith(`.${PROJECT_EXT}`) && !lower.endsWith('.json')) throw new Error(t('unknownFile'));
     const p = deserializeProject(await file.text());
     if (!(await confirmDiscard(ed))) return;
     ed.setProject(p);

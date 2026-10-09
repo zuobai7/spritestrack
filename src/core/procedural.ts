@@ -21,6 +21,8 @@ export interface ParamDef {
   min?: number;
   max?: number;
   step?: number;
+  /** Show a 0–1 value as a percentage (for sizes relative to the model). */
+  percent?: boolean;
   options?: { value: string; label: Localized }[];
 }
 
@@ -228,10 +230,10 @@ registerGenerator({
   animated: true,
   params: [
     { key: 'scale', label: L('噪声缩放', 'Noise scale'), type: 'number', default: 0.08, min: 0.01, max: 0.5, step: 0.01 },
-    { key: 'height', label: L('高度', 'Height'), type: 'number', default: 0.7, min: 0.1, max: 1, step: 0.05 },
-    { key: 'water', label: L('水位', 'Water level'), type: 'number', default: 0.25, min: 0, max: 1, step: 0.05 },
+    { key: 'height', label: L('最高高度', 'Max height'), type: 'number', default: 0.7, min: 0.1, max: 1, step: 0.05, percent: true },
+    { key: 'water', label: L('水位（占高度）', 'Water level (of height)'), type: 'number', default: 0.2, min: 0, max: 1, step: 0.05, percent: true },
     { key: 'island', label: L('岛屿形状', 'Island shape'), type: 'bool', default: true },
-    { key: 'waves', label: L('动画水波', 'Animated waves'), type: 'bool', default: true },
+    { key: 'waves', label: L('水波（动画）', 'Waves (animation)'), type: 'bool', default: true },
   ],
   generate(ctx, p) {
     const grass = ctx.color('#63c74d');
@@ -241,25 +243,56 @@ registerGenerator({
     const snow = ctx.color('#ffffff');
     const water = ctx.color('#0099db');
     const s = Number(p.scale);
-    const maxH = Math.max(1, Math.floor(ctx.sy * Number(p.height)));
-    const waterH = Math.floor(ctx.sy * Number(p.water));
-    for (let z = 0; z < ctx.sz; z++)
-      for (let x = 0; x < ctx.sx; x++) {
-        let n = (ctx.fbm2(x * s, z * s, 4) + 1) / 2;
+    const { sx, sz } = ctx;
+    const maxH = Math.max(1, Math.round(ctx.sy * Number(p.height)));
+    // The water level is a share of the terrain's height, so changing the
+    // height lifts the land and the sea together
+    const waterH = Math.round(maxH * Number(p.water));
+    // Raw noise only covers part of its range; stretch it over 0..1 so the
+    // height setting means the same thing for every seed and scale
+    const level = new Float32Array(sx * sz);
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let z = 0; z < sz; z++)
+      for (let x = 0; x < sx; x++) {
+        const v = ctx.fbm2(x * s, z * s, 4);
+        level[z * sx + x] = v;
+        lo = Math.min(lo, v);
+        hi = Math.max(hi, v);
+      }
+    let peak = 0;
+    for (let z = 0; z < sz; z++)
+      for (let x = 0; x < sx; x++) {
+        const i = z * sx + x;
+        let n = hi > lo ? (level[i] - lo) / (hi - lo) : 0.5;
         if (p.island) {
-          const dx = (x + 0.5) / ctx.sx - 0.5;
-          const dz = (z + 0.5) / ctx.sz - 0.5;
-          n *= Math.max(0, 1 - Math.sqrt(dx * dx + dz * dz) * 1.9);
+          // Full height in the middle, sinking smoothly to the sea at the edges
+          const dx = ((x + 0.5) / sx - 0.5) * 2;
+          const dz = ((z + 0.5) / sz - 0.5) * 2;
+          const f = Math.min(1, Math.max(0, (Math.sqrt(dx * dx + dz * dz) - 0.45) / 0.55));
+          n *= 1 - f * f * (3 - 2 * f);
         }
-        const h = Math.max(1, Math.round(n * maxH));
+        level[i] = n;
+        peak = Math.max(peak, n);
+      }
+    // The highest point reaches the chosen height; rock and snow start at
+    // fixed shares of it and only well above the water. Water needs at least
+    // two layers to show above the ground, and only then is there a beach.
+    const shore = waterH > 1 ? waterH + 1 : 0;
+    const rockLine = Math.max(waterH + 3, 4, Math.round(maxH * 0.65));
+    const snowLine = Math.max(waterH + 5, 6, Math.round(maxH * 0.82));
+    for (let z = 0; z < sz; z++)
+      for (let x = 0; x < sx; x++) {
+        const h = Math.max(1, Math.round((peak > 0 ? level[z * sx + x] / peak : 0) * maxH));
         for (let y = 0; y < h; y++) {
           let c = y < h - 3 ? stone : y < h - 1 ? dirt : grass;
-          if (y === h - 1 && h <= waterH + 1) c = sand;
-          if (y === h - 1 && h > maxH * 0.8) c = snow;
-          else if (y >= h - 2 && h > maxH * 0.65) c = stone;
+          if (y === h - 1 && h <= shore) c = sand;
+          if (y === h - 1 && h >= snowLine) c = snow;
+          else if (y >= h - 2 && h >= rockLine) c = stone;
           ctx.set(x, y, z, c);
         }
-        const wave = p.waves ? Math.round(Math.sin(ctx.t * Math.PI * 2 + (x + z) * 0.5) * 0.5) : 0;
+        // Ripples of one voxel that travel across the water during an animation
+        const wave = p.waves && ctx.frameCount > 1 && waterH > 0 ? Math.round(Math.sin(ctx.t * Math.PI * 2 + (x + z) * 0.5)) : 0;
         for (let y = h; y < waterH + wave; y++) ctx.set(x, y, z, water);
       }
   },
@@ -271,8 +304,8 @@ registerGenerator({
   description: L('随机树干和树冠，可做摇摆动画', 'Random trunk and canopy, can sway'),
   animated: true,
   params: [
-    { key: 'trunk', label: L('树干高度', 'Trunk height'), type: 'number', default: 0.45, min: 0.1, max: 0.9, step: 0.05 },
-    { key: 'canopy', label: L('树冠大小', 'Canopy size'), type: 'number', default: 0.35, min: 0.1, max: 0.5, step: 0.05 },
+    { key: 'trunk', label: L('树干高度', 'Trunk height'), type: 'number', default: 0.45, min: 0.1, max: 0.9, step: 0.05, percent: true },
+    { key: 'canopy', label: L('树冠大小', 'Canopy size'), type: 'number', default: 0.35, min: 0.1, max: 0.5, step: 0.05, percent: true },
     { key: 'kind', label: L('类型', 'Kind'), type: 'select', default: 'round', options: [
       { value: 'round', label: L('圆形', 'Round') },
       { value: 'pine', label: L('松树', 'Pine') },
@@ -280,7 +313,7 @@ registerGenerator({
     ] },
     { key: 'leaf', label: L('树叶颜色', 'Leaf color'), type: 'color', default: '#3e8948' },
     { key: 'fruit', label: L('果实', 'Fruit'), type: 'bool', default: true },
-    { key: 'sway', label: L('摇摆幅度', 'Sway'), type: 'number', default: 1, min: 0, max: 3, step: 0.5 },
+    { key: 'sway', label: L('摇摆（动画）', 'Sway (animation)'), type: 'number', default: 1, min: 0, max: 3, step: 0.5 },
   ],
   generate(ctx, p) {
     const bark = ctx.color('#733e39');
@@ -290,7 +323,9 @@ registerGenerator({
     const cx = ctx.sx / 2;
     const cz = ctx.sz / 2;
     const th = Math.max(2, Math.floor(ctx.sy * Number(p.trunk)));
-    const r = Math.max(1.5, Math.min(ctx.sx, ctx.sz) * Number(p.canopy));
+    // The canopy must fit above the trunk, or it would swallow the trunk and
+    // a taller trunk would change nothing
+    const r = Math.max(1.5, Math.min(Math.min(ctx.sx, ctx.sz) * Number(p.canopy), (ctx.sy - th) / 1.4));
     const sway = (y: number) => Math.sin(ctx.t * Math.PI * 2) * Number(p.sway) * (y / ctx.sy);
     const tw = Math.max(1, Math.round(ctx.sx / 16));
     for (let y = 0; y < th; y++) {
@@ -324,11 +359,20 @@ registerGenerator({
       }
     }
     if (p.fruit && p.kind !== 'pine') {
-      for (let i = 0; i < 6; i++) {
-        const x = ctx.randInt(0, ctx.sx - 1);
-        const y = ctx.randInt(th, ctx.sy - 1);
-        const z = ctx.randInt(0, ctx.sz - 1);
-        if (ctx.get(x, y, z) && (!ctx.get(x + 1, y, z) || !ctx.get(x, y, z + 1))) ctx.set(x, y, z, fruit);
+      // Fruit sits on leaves at the canopy's surface, about one in twenty of them
+      const surface: [number, number, number][] = [];
+      for (let y = 0; y < ctx.sy; y++)
+        for (let z = 0; z < ctx.sz; z++)
+          for (let x = 0; x < ctx.sx; x++) {
+            const v = ctx.get(x, y, z);
+            if ((v === leaf || v === leafHi) && (!ctx.get(x + 1, y, z) || !ctx.get(x - 1, y, z) || !ctx.get(x, y, z + 1) || !ctx.get(x, y, z - 1)))
+              surface.push([x, y, z]);
+          }
+      const count = Math.min(surface.length, Math.max(2, Math.round(surface.length / 20)));
+      for (let i = 0; i < count; i++) {
+        const k = ctx.randInt(i, surface.length - 1);
+        [surface[i], surface[k]] = [surface[k], surface[i]];
+        ctx.set(surface[i][0], surface[i][1], surface[i][2], fruit);
       }
     }
   },
@@ -339,8 +383,8 @@ registerGenerator({
   name: L('岩石', 'Rock'),
   description: L('噪声扰动的石块', 'Noise-displaced boulder'),
   params: [
-    { key: 'size', label: L('大小', 'Size'), type: 'number', default: 0.8, min: 0.2, max: 1, step: 0.05 },
-    { key: 'rough', label: L('粗糙度', 'Roughness'), type: 'number', default: 0.35, min: 0, max: 1, step: 0.05 },
+    { key: 'size', label: L('大小', 'Size'), type: 'number', default: 0.8, min: 0.2, max: 1, step: 0.05, percent: true },
+    { key: 'rough', label: L('粗糙度', 'Roughness'), type: 'number', default: 0.35, min: 0, max: 1, step: 0.05, percent: true },
     { key: 'moss', label: L('青苔', 'Moss'), type: 'bool', default: true },
   ],
   generate(ctx, p) {
@@ -383,22 +427,30 @@ registerGenerator({
       { value: 'torus', label: L('圆环', 'Torus') },
       { value: 'pyramid', label: L('金字塔', 'Pyramid') },
     ] },
+    { key: 'size', label: L('大小', 'Size'), type: 'number', default: 1, min: 0.2, max: 1, step: 0.05, percent: true },
     { key: 'hollow', label: L('空心', 'Hollow'), type: 'bool', default: false },
     { key: 'color', label: L('颜色', 'Color'), type: 'color', default: '#0099db' },
   ],
   generate(ctx, p) {
     const c = ctx.color(String(p.color));
+    const size = Math.max(0.05, Math.min(1, Number(p.size ?? 1)));
+    // Centered on the ground; at 100% the shape fills the whole model
+    const rx = (ctx.sx / 2) * size;
+    const ry = (ctx.sy / 2) * size;
+    const rz = (ctx.sz / 2) * size;
     const cx = ctx.sx / 2;
-    const cy = ctx.sy / 2;
+    const cy = ry;
     const cz = ctx.sz / 2;
     const inside = (x: number, y: number, z: number): boolean => {
-      const nx = (x + 0.5 - cx) / cx;
-      const ny = (y + 0.5 - cy) / cy;
-      const nz = (z + 0.5 - cz) / cz;
+      // Outside the model counts as outside, so hollow shapes stay closed
+      if (x < 0 || y < 0 || z < 0 || x >= ctx.sx || y >= ctx.sy || z >= ctx.sz) return false;
+      const nx = (x + 0.5 - cx) / rx;
+      const ny = (y + 0.5 - cy) / ry;
+      const nz = (z + 0.5 - cz) / rz;
       const r = Math.sqrt(nx * nx + nz * nz);
       switch (p.shape) {
         case 'cylinder':
-          return r <= 1;
+          return r <= 1 && Math.abs(ny) <= 1;
         case 'cone':
           return r <= (1 - ny) / 2;
         case 'torus': {
@@ -441,8 +493,12 @@ registerGenerator({
     const z0 = 1;
     const x1 = ctx.sx - 2;
     const z1 = ctx.sz - 2;
-    const floorH = Math.max(3, Math.floor((ctx.sy * 0.55) / Number(p.floors)));
-    const wallTop = Math.min(ctx.sy - 3, floorH * Number(p.floors)) - 1;
+    const floors = Math.max(1, Math.round(Number(p.floors)));
+    // Leave room for the roof above the walls (a full roof needs `half` layers)
+    const half = Math.ceil((z1 - z0 + 3) / 2);
+    const room = Math.max(3, ctx.sy - Math.min(half, Math.ceil(ctx.sy * 0.4)));
+    const floorH = Math.max(3, Math.floor(room / floors));
+    const wallTop = Math.min(ctx.sy - 2, floorH * floors) - 1;
     for (let y = 0; y <= wallTop; y++)
       for (let z = z0; z <= z1; z++)
         for (let x = x0; x <= x1; x++) {
@@ -455,7 +511,7 @@ registerGenerator({
     const mid = Math.floor((x0 + x1) / 2);
     ctx.box(mid, 1, z1, mid + (ctx.sx > 10 ? 1 : 0), Math.min(wallTop - 1, 3), z1, wood);
     // Windows on every floor
-    for (let f = 0; f < Number(p.floors); f++) {
+    for (let f = 0; f < floors; f++) {
       const wy = f * floorH + Math.floor(floorH / 2);
       if (wy >= wallTop) continue;
       for (const wx of [x0 + 2, x1 - 2]) {
@@ -467,14 +523,15 @@ registerGenerator({
         ctx.set(x1, wy, wz, glass);
       }
     }
-    // Pitched roof along x
-    const half = Math.ceil((z1 - z0 + 3) / 2);
+    // Pitched roof along x; if the model is too short for the full slope, the
+    // top layer is closed flat so the roof never stays open
     for (let i = 0; i < half; i++) {
       const y = wallTop + 1 + i;
       if (y >= ctx.sy) break;
       for (let x = x0 - 1; x <= x1 + 1; x++) {
         ctx.set(x, y, z0 - 1 + i, roof);
         ctx.set(x, y, z1 + 1 - i, roof);
+        if (y === ctx.sy - 1) for (let z = z0 - 1 + i; z <= z1 + 1 - i; z++) ctx.set(x, y, z, roof);
       }
       // Gable walls
       for (let z = z0 + i; z <= z1 - i; z++) {
@@ -492,7 +549,7 @@ registerGenerator({
   description: L('噪声驱动的火焰，适合生成循环动画', 'Noise-driven flame, made for looping animation'),
   animated: true,
   params: [
-    { key: 'size', label: L('大小', 'Size'), type: 'number', default: 0.8, min: 0.3, max: 1, step: 0.05 },
+    { key: 'size', label: L('大小', 'Size'), type: 'number', default: 0.8, min: 0.3, max: 1, step: 0.05, percent: true },
     { key: 'logs', label: L('木柴', 'Logs'), type: 'bool', default: true },
   ],
   generate(ctx, p) {
@@ -507,17 +564,24 @@ registerGenerator({
     }
     const R = (Math.min(ctx.sx, ctx.sz) / 2) * Number(p.size);
     const H = (ctx.sy - base) * Number(p.size);
-    // Loop seamlessly: sample noise on a circle in time
+    // Loop seamlessly: the sideways drift goes round a circle, and the rising
+    // noise blends into a copy shifted by one loop, so t = 1 matches t = 0
     const ta = ctx.t * Math.PI * 2;
     const tx = Math.cos(ta) * 1.5;
     const tz = Math.sin(ta) * 1.5;
+    const w0 = 1 - ctx.t;
+    const w1 = ctx.t;
+    const norm = 1 / Math.hypot(w0, w1);
     for (let y = base; y < ctx.sy; y++)
       for (let z = 0; z < ctx.sz; z++)
         for (let x = 0; x < ctx.sx; x++) {
           const h = (y - base) / H;
           if (h > 1) continue;
           const r = Math.hypot(x + 0.5 - cx, z + 0.5 - cz) / R;
-          const n = ctx.noise3(x * 0.25 + tx, (y - base) * 0.18 - ctx.t * 4, z * 0.25 + tz);
+          const rise = (y - base) * 0.18;
+          const n0 = ctx.noise3(x * 0.25 + tx, rise - ctx.t * 4, z * 0.25 + tz);
+          const n1 = w1 ? ctx.noise3(x * 0.25 + tx, rise - (ctx.t - 1) * 4, z * 0.25 + tz) : 0;
+          const n = (w0 * n0 + w1 * n1) * norm;
           const v = 1 - r - h * 0.9 + n * 0.45;
           if (v <= 0) continue;
           const k = Math.min(cols.length - 1, Math.floor((1 - Math.min(1, v * 1.6)) * cols.length));

@@ -7,9 +7,11 @@ type Child = Node | string | null | undefined | false;
 /** Tiny hyperscript helper: h('button', { class: 'x', onclick }, 'Label'). */
 export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs = {}, ...children: (Child | Child[])[]): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag);
+  let value: unknown;
   for (const [k, v] of Object.entries(attrs)) {
     if (v === undefined || v === null || v === false) continue;
-    if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v as EventListener);
+    if (k === 'value' && 'value' in el) value = v;
+    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v as EventListener);
     else if (k === 'class') el.className = String(v);
     else if (k === 'html') el.innerHTML = String(v);
     else if (k in el && typeof v !== 'string') (el as unknown as Record<string, unknown>)[k] = v;
@@ -19,6 +21,9 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Attrs = 
     if (c === null || c === undefined || c === false) continue;
     el.append(c);
   }
+  // Last, once min/max/step and any <option>s exist: a range input set earlier
+  // snaps the value to the default 0–100 range with step 1 (0.7 became 0.1)
+  if (value !== undefined) (el as unknown as { value: string }).value = String(value);
   return el;
 }
 
@@ -86,19 +91,30 @@ export interface Modal {
   close(): void;
 }
 
+/** Open dialogs, topmost last; only the topmost one reacts to Escape. */
+const openModals: (() => void)[] = [];
+
 export function openModal(title: string, opts: { wide?: boolean; onClose?: () => void } = {}): Modal {
   const body = h('div', { class: 'modal-body' });
   const footer = h('div', { class: 'modal-footer' });
+  // Focus moves into the dialog (so Enter or Space can't press the button
+  // that opened it again) and goes back when it closes
+  const returnFocus = document.activeElement as HTMLElement | null;
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     overlay.remove();
     window.removeEventListener('keydown', onKey, true);
+    openModals.splice(openModals.indexOf(close), 1);
     opts.onClose?.();
+    if (returnFocus?.isConnected && !openModals.length) returnFocus.focus();
   };
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.stopPropagation();
-      close();
-    }
+    if (e.key !== 'Escape' || openModals[openModals.length - 1] !== close) return;
+    e.stopPropagation();
+    e.preventDefault();
+    close();
   };
   const panel = h(
     'div',
@@ -109,7 +125,10 @@ export function openModal(title: string, opts: { wide?: boolean; onClose?: () =>
   );
   const overlay = h('div', { class: 'overlay', onmousedown: (e: MouseEvent) => e.target === overlay && close() }, panel);
   document.body.append(overlay);
+  openModals.push(close);
   window.addEventListener('keydown', onKey, true);
+  panel.tabIndex = -1;
+  panel.focus({ preventScroll: true });
   return { el: panel, body, footer, close };
 }
 
@@ -150,11 +169,18 @@ export function numberField(value: number, min: number, max: number, step: numbe
   return el;
 }
 
-export function rangeInput(value: number, min: number, max: number, step: number, onchange: (v: number) => void): HTMLElement {
-  const out = h('output', {}, String(value));
+export function rangeInput(
+  value: number,
+  min: number,
+  max: number,
+  step: number,
+  onchange: (v: number) => void,
+  format: (v: number) => string = String,
+): HTMLElement {
+  const out = h('output', {}, format(value));
   const el = h('input', { type: 'range', value: String(value), min: String(min), max: String(max), step: String(step) });
   el.addEventListener('input', () => {
-    out.textContent = el.value;
+    out.textContent = format(Number(el.value));
     onchange(Number(el.value));
   });
   return h('span', { class: 'range' }, el, out);
@@ -223,6 +249,8 @@ export function menuButton(content: string, items: () => MenuItem[], cls = 'btn'
     const close = (ev: Event) => {
       if (ev.type === 'keydown' && (ev as KeyboardEvent).key !== 'Escape') return;
       if (ev.type === 'mousedown' && list.contains(ev.target as Node)) return;
+      // The Escape that closes the menu does nothing else (like clearing the selection)
+      if (ev.type === 'keydown') ev.stopPropagation();
       list.remove();
       window.removeEventListener('mousedown', close, true);
       window.removeEventListener('keydown', close, true);

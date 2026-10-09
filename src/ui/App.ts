@@ -5,7 +5,7 @@ import { Viewport, type ViewName } from '../render/Viewport';
 import { getLang, setLang, t } from '../i18n';
 import { askText, h, menuButton, pickFile, Scope, toast } from './dom';
 import { icon } from './icons';
-import { isTauri, readAutosave, readPrefs, saveProjectFile, writeAutosave, writePrefs } from './files';
+import { isTauri, markAutosaveClean, readAutosave, readPrefs, saveProjectFile, writeAutosave, writePrefs } from './files';
 import { mountSidebar } from './sidebar';
 import { mountTimeline } from './timeline';
 import { openSpriteExport } from './dialogs/exportSprites';
@@ -14,6 +14,7 @@ import { openGenerate } from './dialogs/generate';
 import { openRigEditor } from './dialogs/rigEditor';
 import { openImageImport } from './dialogs/importImage';
 import { importVoxFile, openAnyFile, openHelp, openNewProject } from './dialogs/project';
+import { openMinecraftImport } from './dialogs/importMinecraft';
 import type { LightSettings } from '../core/lighting';
 import type { BrushShape } from '../core/tools';
 
@@ -65,7 +66,9 @@ export class App {
 
   constructor(readonly root: HTMLElement) {
     const restored = readAutosave();
-    this.ed = new Editor(restored ?? createDemoProject());
+    this.ed = new Editor(restored?.project ?? createDemoProject());
+    // Restored work that was never saved to a file still counts as unsaved
+    if (restored) this.ed.dirty = restored.dirty;
     this.applyPrefs();
     root.append(this.top, this.tools, this.view, this.side, this.time);
     this.viewport = new Viewport(this.view, this.ed);
@@ -128,6 +131,7 @@ export class App {
     const importMenu = menuButton(`${icon('upload')}<span>${t('import')}</span>`, () => [
       { label: t('importImage'), icon: icon('image', 16), action: () => openImageImport(ed) },
       { label: t('importVox'), icon: icon('cube', 16), action: () => importVoxFile(ed) },
+      { label: t('importMcMenu'), icon: icon('cube', 16), action: () => openMinecraftImport(ed) },
       { label: t('openProject'), icon: icon('open', 16), hint: 'Ctrl+O', action: () => openAnyFile(ed) },
       { label: t('loadPlugin'), icon: icon('sparkle', 16), action: () => loadPlugin() },
     ]);
@@ -184,7 +188,10 @@ export class App {
       return b;
     });
     const size = h('input', { type: 'number', min: '1', max: '16', step: '1', title: t('brushSize') + ' ([ ])' });
-    size.addEventListener('change', () => ed.setBrush({ size: Number(size.value) }));
+    size.addEventListener('change', () => {
+      ed.setBrush({ size: Number(size.value) || 1 });
+      size.value = String(ed.brush.size);
+    });
     const shape = h('button', { class: 'tool mini', onclick: () => ed.setBrush({ shape: ed.brush.shape === 'cube' ? 'sphere' : 'cube' }) });
     const mirrors = (['x', 'y', 'z'] as const).map((a) =>
       h('button', {
@@ -279,6 +286,7 @@ export class App {
   async save(): Promise<void> {
     if (await saveProjectFile(this.ed.project)) {
       this.ed.dirty = false;
+      markAutosaveClean();
       this.updateTitle();
       toast(t('saved'));
     }
@@ -291,9 +299,11 @@ export class App {
       if (this.saveTimer !== null) clearTimeout(this.saveTimer);
       this.saveTimer = window.setTimeout(() => {
         this.saveTimer = null;
-        if (!writeAutosave(ed.project) && !this.autosaveWarned) {
+        // Warn again whenever saving starts failing after it had worked
+        if (writeAutosave(ed.project, ed.dirty)) this.autosaveWarned = false;
+        else if (!this.autosaveWarned) {
           this.autosaveWarned = true;
-          toast(t('autosaveFailed'), 5000);
+          toast(t('autosaveFailed'), 6000);
         }
       }, 1500);
     };
@@ -310,7 +320,7 @@ export class App {
     ed.on('light', savePrefs);
     ed.on('state', savePrefs);
     window.addEventListener('beforeunload', () => {
-      if (this.saveTimer !== null) writeAutosave(ed.project);
+      if (this.saveTimer !== null) writeAutosave(ed.project, ed.dirty);
     });
   }
 
@@ -332,6 +342,8 @@ export class App {
       const file = e.dataTransfer?.files?.[0];
       if (!file) return;
       e.preventDefault();
+      // An open dialog works on the current project, so it isn't swapped out underneath
+      if (document.querySelector('.overlay')) return toast(t('closeDialogFirst'), 3000);
       void openAnyFile(this.ed, file);
     });
   }
@@ -424,7 +436,9 @@ export class App {
         }
         case ' ':
           e.preventDefault();
-          return ed.togglePlay();
+          // Holding the key would toggle on every repeat
+          if (!e.repeat) ed.togglePlay();
+          return;
         case ',':
         case '<':
           ed.stop();

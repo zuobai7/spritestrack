@@ -24,6 +24,46 @@ const FACES: { n: V3; c: V3[] }[] = [
   { n: [0, 0, -1], c: [[1, 0, 0], [0, 0, 0], [0, 1, 0], [1, 1, 0]] },
 ];
 
+/**
+ * The outer faces of a set of cells: faces shared with another cell of the
+ * set, or covered by a voxel for which `solid` is true, are left out. Used to
+ * highlight the cells a tool is about to change.
+ */
+export function buildCellFaces(
+  cells: V3[],
+  size: V3,
+  solid: (x: number, y: number, z: number) => boolean,
+): { positions: Float32Array; normals: Float32Array; indices: Uint32Array } {
+  const [sx, sy, sz] = size;
+  const key = (x: number, y: number, z: number) => x + sx * (z + sz * y);
+  const set = new Set<number>();
+  const unique: V3[] = [];
+  for (const c of cells) {
+    const k = key(c[0], c[1], c[2]);
+    if (set.has(k)) continue;
+    set.add(k);
+    unique.push(c);
+  }
+  const pos: number[] = [];
+  const nor: number[] = [];
+  const idx: number[] = [];
+  for (const [x, y, z] of unique)
+    for (const f of FACES) {
+      const nx = x + f.n[0];
+      const ny = y + f.n[1];
+      const nz = z + f.n[2];
+      const inside = nx >= 0 && ny >= 0 && nz >= 0 && nx < sx && ny < sy && nz < sz;
+      if (inside && (set.has(key(nx, ny, nz)) || solid(nx, ny, nz))) continue;
+      const base = pos.length / 3;
+      for (const c of f.c) {
+        pos.push(x + c[0], y + c[1], z + c[2]);
+        nor.push(f.n[0], f.n[1], f.n[2]);
+      }
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+  return { positions: new Float32Array(pos), normals: new Float32Array(nor), indices: new Uint32Array(idx) };
+}
+
 export const AO_CURVE = [0.5, 0.68, 0.84, 1];
 
 export interface MeshOptions {

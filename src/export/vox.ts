@@ -83,7 +83,8 @@ function defaultVoxPalette(): number[] {
   const out: number[] = [0];
   // Approximation of the standard 6x6x6 cube + ramps; only used as a fallback.
   const steps = [0xff, 0xcc, 0x99, 0x66, 0x33, 0x00];
-  for (const r of steps) for (const g of steps) for (const b of steps) out.push((r << 16) | (g << 8) | b);
+  // The 6x6x6 cube without black (black would push the ramps one index off)
+  for (const r of steps) for (const g of steps) for (const b of steps) if (r | g | b) out.push((r << 16) | (g << 8) | b);
   const ramp = [0xee, 0xdd, 0xbb, 0xaa, 0x88, 0x77, 0x55, 0x44, 0x22, 0x11];
   for (const v of ramp) out.push(v << 16);
   for (const v of ramp) out.push(v << 8);

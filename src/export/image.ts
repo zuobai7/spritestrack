@@ -40,14 +40,17 @@ export function scaleImage(img: RgbaImage, factor: number): RgbaImage {
   return out;
 }
 
-/** Adds a 1px outline around opaque pixels (4-neighborhood). */
+/**
+ * Adds a 1px outline around opaque pixels (4-neighborhood). Semi-transparent
+ * pixels such as a ground shadow don't count, so the outline hugs the model.
+ */
 export function outlineImage(img: RgbaImage, color: number): RgbaImage {
   const out: RgbaImage = { width: img.width, height: img.height, data: img.data.slice() };
+  const solid = (x: number, y: number) => alphaAt(img, x, y) >= 128;
   for (let y = 0; y < img.height; y++)
     for (let x = 0; x < img.width; x++) {
-      if (alphaAt(img, x, y)) continue;
-      if (alphaAt(img, x - 1, y) || alphaAt(img, x + 1, y) || alphaAt(img, x, y - 1) || alphaAt(img, x, y + 1))
-        putPixel(out, x, y, color);
+      if (solid(x, y)) continue;
+      if (solid(x - 1, y) || solid(x + 1, y) || solid(x, y - 1) || solid(x, y + 1)) putPixel(out, x, y, color);
     }
   return out;
 }

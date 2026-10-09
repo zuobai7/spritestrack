@@ -1,8 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { Editor } from '../editor/Editor';
+import type { Editor, Tool } from '../editor/Editor';
 import { raycastAxisPlane, raycastGrid, raycastPlaneY, type Vec3 } from '../core/raycast';
-import { boxCells, floodCells, lineCells, normBox, surfaceFillCells } from '../core/tools';
+import { buildCellFaces } from '../core/mesher';
+import { boxCells, lineCells, mirrored, normBox } from '../core/tools';
+import { t } from '../i18n';
 import { culledGeometry, lightVector } from './meshBuilder';
 
 interface PickResult {
@@ -14,15 +16,24 @@ interface PickResult {
 }
 
 interface Drag {
+  /** Tool and pointer that started the drag (the tool can change mid-drag via shortcuts). */
+  tool: Tool;
+  pointerId: number;
   erase: boolean;
   start: Vec3 | null;
   axis: number;
   level: number;
+  /** Coordinate (on `axis`) of the face plane the drag started on. */
+  plane: number;
   last: Vec3 | null;
   moved: boolean;
 }
 
 export type ViewName = 'front' | 'back' | 'left' | 'right' | 'top' | 'iso';
+
+/** Above this many cells the tool preview only shows the cursor (building the mesh would stall). */
+const PREVIEW_LIMIT = 120_000;
+const ERASE_COLOR = 0xff4466;
 
 /**
  * The 3D editing view: renders the current frame, the grid, the layer plane,
@@ -43,6 +54,12 @@ export class Viewport {
   private cursor: THREE.LineSegments;
   private cursorFill: THREE.Mesh;
   private selectionBox: THREE.LineSegments;
+  /** Highlights the voxels the current tool would change at the cursor. */
+  private preview: THREE.Mesh;
+  private previewKey = '';
+  /** Floating hint next to the cursor (picked color, fill size). */
+  private tip: HTMLDivElement;
+  private lastPointer: PointerEvent | null = null;
   private pivots = new THREE.Group();
   private reference: THREE.Mesh;
   private referenceUrl = '';
@@ -53,6 +70,10 @@ export class Viewport {
   private raycaster = new THREE.Raycaster();
   private drag: Drag | null = null;
   private needsRender = true;
+  /** The voxel meshes are rebuilt at most once per animation frame. */
+  private meshDirty = false;
+  private paletteKey = '';
+  private gridKey = '';
   private altDown = false;
   private viewKey = '';
   onStatus: (text: string) => void = () => {};
@@ -73,6 +94,8 @@ export class Viewport {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.15;
     this.controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+    // One finger draws with the tool; two fingers turn and zoom the camera
+    this.controls.touches = { ONE: null, TWO: THREE.TOUCH.DOLLY_ROTATE };
     this.controls.addEventListener('change', () => (this.needsRender = true));
 
     this.ambient = new THREE.HemisphereLight(0xffffff, 0x8890a0, 1);
@@ -114,6 +137,25 @@ export class Viewport {
       new THREE.LineBasicMaterial({ color: 0xffd23d, depthTest: false, transparent: true }),
     );
     this.selectionBox.renderOrder = 10;
+    this.preview = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      // Drawn over the voxel faces it covers, never hiding anything behind them
+      new THREE.MeshLambertMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.72,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -4,
+      }),
+    );
+    this.preview.renderOrder = 5;
+    this.preview.visible = false;
+    this.tip = document.createElement('div');
+    this.tip.className = 'view-tip';
+    this.tip.hidden = true;
+    container.appendChild(this.tip);
     this.reference = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1),
       new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false }),
@@ -128,6 +170,7 @@ export class Viewport {
       this.layerPlane,
       this.cursor,
       this.cursorFill,
+      this.preview,
       this.selectionBox,
       this.pivots,
       this.reference,
@@ -137,16 +180,40 @@ export class Viewport {
     el.addEventListener('pointerdown', (e) => this.onDown(e));
     el.addEventListener('pointermove', (e) => this.onMove(e));
     window.addEventListener('pointerup', (e) => this.onUp(e));
-    el.addEventListener('pointerleave', () => this.hideCursor());
+    // A drag must never outlive the press: the browser may cancel the pointer,
+    // or the window may lose focus while the button is down
+    el.addEventListener('pointercancel', (e) => this.drag?.pointerId === e.pointerId && this.endDrag(false));
+    el.addEventListener('pointerleave', () => {
+      this.lastPointer = null;
+      if (!this.drag) this.hideCursor();
+    });
     el.addEventListener('contextmenu', (e) => e.preventDefault());
-    window.addEventListener('keydown', (e) => this.setAlt(e.altKey));
+    window.addEventListener('keydown', (e) => {
+      this.setAlt(e.altKey);
+      if (e.key === 'Escape' && this.drag) this.endDrag(false);
+    });
     window.addEventListener('keyup', (e) => this.setAlt(e.altKey));
-    window.addEventListener('blur', () => this.setAlt(false));
+    window.addEventListener('blur', () => {
+      this.setAlt(false);
+      this.endDrag(false);
+    });
     new ResizeObserver(() => this.resize()).observe(container);
 
     editor.on('model', () => this.rebuildMesh());
     editor.on('frame', () => this.rebuildMesh());
-    editor.on('palette', () => this.rebuildMesh());
+    // Picking a color also sends 'palette'; only real palette changes need new meshes
+    editor.on('palette', () => {
+      const key = editor.project.palette.join(',');
+      if (key === this.paletteKey) return;
+      this.paletteKey = key;
+      this.rebuildMesh();
+    });
+    // The hover preview follows changes made without moving the mouse (a
+    // click, a shortcut, another color)
+    for (const ev of ['model', 'frame', 'palette', 'state', 'frames'] as const)
+      editor.on(ev, () => {
+        if (this.lastPointer && !this.drag) this.updateCursor(this.lastPointer);
+      });
     editor.on('rig', () => {
       if (this.editor.partOverlay) this.rebuildMesh();
       this.updatePivots();
@@ -166,9 +233,21 @@ export class Viewport {
 
     this.rebuildAll(true);
     this.resize();
+    // Moving the window to a screen with another pixel density changes no size, so watch for it
+    const watchDensity = () =>
+      matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
+        'change',
+        () => {
+          this.resize();
+          watchDensity();
+        },
+        { once: true },
+      );
+    watchDensity();
     const loop = () => {
       requestAnimationFrame(loop);
       this.controls.update();
+      if (this.meshDirty) this.buildMeshes();
       if (this.needsRender) {
         this.needsRender = false;
         this.renderer.render(this.scene, this.camera);
@@ -191,6 +270,7 @@ export class Viewport {
   resize(): void {
     const w = this.container.clientWidth || 1;
     const h = this.container.clientHeight || 1;
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
@@ -222,11 +302,16 @@ export class Viewport {
   }
 
   private rebuildAll(resetCam: boolean): void {
-    const { sx, sz } = this.editor.project;
+    const { sx, sy, sz } = this.editor.project;
     this.root.position.set(-sx / 2, 0, -sz / 2);
     this.ground.scale.set(sx * 3, sz * 3, 1);
     this.ground.position.set(sx / 2, -0.001, sz / 2);
-    this.buildGrid();
+    // The grid only changes with the model size
+    const gridKey = `${sx},${sy},${sz}`;
+    if (gridKey !== this.gridKey) {
+      this.gridKey = gridKey;
+      this.buildGrid();
+    }
     this.updateLayerPlane();
     this.updateLight();
     this.updateSelection();
@@ -237,7 +322,7 @@ export class Viewport {
   }
 
   private buildGrid(): void {
-    this.gridLines.clear();
+    disposeChildren(this.gridLines);
     const { sx, sy, sz } = this.editor.project;
     const pts: number[] = [];
     for (let x = 0; x <= sx; x++) pts.push(x, 0, 0, x, 0, sz);
@@ -305,7 +390,7 @@ export class Viewport {
   }
 
   private updatePivots(): void {
-    this.pivots.clear();
+    disposeChildren(this.pivots);
     const rig = this.editor.project.rig;
     if (!rig || !this.editor.partOverlay) return void (this.needsRender = true);
     const r = Math.max(0.25, Math.max(this.editor.project.sx, this.editor.project.sy) / 64);
@@ -363,8 +448,16 @@ export class Viewport {
     this.needsRender = true;
   }
 
+  /** Marks the voxel meshes for rebuilding on the next animation frame. */
   rebuildMesh(): void {
+    this.meshDirty = true;
+    this.needsRender = true;
+  }
+
+  private buildMeshes(): void {
+    this.meshDirty = false;
     const ed = this.editor;
+    this.paletteKey = ed.project.palette.join(',');
     this.viewKey = this.currentViewKey();
     const layerMode = ed.mode === 'layer';
     const maxY = layerMode ? ed.layer : Infinity;
@@ -399,6 +492,10 @@ export class Viewport {
     const g = ed.frame;
     const { o, d } = this.gridRay(e);
     if (ed.mode === 'layer') {
+      // The voxels of the current layer where they are seen (their top and
+      // side faces), otherwise the layer's floor
+      const hit = raycastGrid(g, o, d, ed.layer);
+      if (hit && hit.voxel[1] === ed.layer) return { place: hit.voxel, target: hit.voxel, normal: [0, 1, 0] };
       const c = raycastPlaneY(g, o, d, ed.layer);
       return { place: c, target: c && g.get(c[0], c[1], c[2]) ? c : null, normal: [0, 1, 0] };
     }
@@ -411,20 +508,28 @@ export class Viewport {
   }
 
   /** Continues a drag on the plane where it started. */
-  private pickOnPlane(e: PointerEvent, axis: number, level: number): Vec3 | null {
-    const { o, d } = this.gridRay(e);
-    return raycastAxisPlane(this.editor.frame, o, d, axis, level);
+  private pickOnPlane(e: PointerEvent, d: Drag): Vec3 | null {
+    const ray = this.gridRay(e);
+    return raycastAxisPlane(this.editor.frame, ray.o, ray.d, d.axis, d.level, d.plane);
   }
 
   // ---- input --------------------------------------------------------------
 
   private onDown(e: PointerEvent): void {
+    if (!e.isPrimary) {
+      // A second finger: the camera takes over, so the first finger's drag ends
+      if (this.drag) this.endDrag(false);
+      return;
+    }
     if (e.button !== 0 || e.altKey) return;
+    // A previous drag whose release never arrived ends here
+    if (this.drag) this.endDrag(true);
     const ed = this.editor;
     ed.stop();
     const r = this.pick(e);
     const axis = r.normal[0] ? 0 : r.normal[1] ? 1 : 2;
     this.renderer.domElement.setPointerCapture(e.pointerId);
+    this.hidePreview();
 
     if (ed.pivotPick !== null) {
       // Pivot goes to the center of the clicked face (or the ground cell)
@@ -439,20 +544,34 @@ export class Viewport {
     }
 
     const erase = e.shiftKey && (ed.tool === 'add' || ed.tool === 'box' || ed.tool === 'line');
+    // The drag goes on along the plane of the face that was clicked: the far
+    // side of an empty cell or the near side of a voxel
+    const faceOf = (c: Vec3, isVoxel: boolean) => c[axis] + ((r.normal[axis] > 0) === isVoxel ? 1 : 0);
+    const drag = (start: Vec3 | null, level: number, isErase = erase, isVoxel = isErase): Drag => ({
+      tool: ed.tool,
+      pointerId: e.pointerId,
+      erase: isErase,
+      start,
+      axis,
+      level,
+      plane: start ? faceOf(start, isVoxel) : level + 0.5,
+      last: start,
+      moved: false,
+    });
     switch (ed.tool) {
       case 'add': {
         const c = erase ? r.target : r.place;
         if (!c) return;
         ed.beginStroke();
         ed.strokeSet(ed.brushAt(c), erase ? 0 : ed.color, erase ? 'set' : 'add');
-        this.drag = { erase, start: c, axis, level: c[axis], last: c, moved: false };
+        this.drag = drag(c, c[axis]);
         break;
       }
       case 'erase':
       case 'paint': {
         ed.beginStroke();
         if (r.target) ed.strokeSet(ed.brushAt(r.target), ed.tool === 'erase' ? 0 : ed.color, ed.tool === 'erase' ? 'set' : 'paint');
-        this.drag = { erase: ed.tool === 'erase', start: r.target, axis, level: 0, last: r.target, moved: false };
+        this.drag = drag(r.target, 0, ed.tool === 'erase');
         break;
       }
       case 'part': {
@@ -462,7 +581,7 @@ export class Viewport {
         }
         ed.beginStroke('parts');
         if (r.target) ed.strokeSet(ed.brushAt(r.target), ed.activePart);
-        this.drag = { erase: false, start: r.target, axis, level: 0, last: r.target, moved: false };
+        this.drag = drag(r.target, 0, false);
         break;
       }
       case 'pick': {
@@ -470,29 +589,27 @@ export class Viewport {
         break;
       }
       case 'fill': {
-        if (ed.mode === 'layer') {
-          if (!r.place) return;
-          ed.applyCells(floodCells(ed.frame, r.place, true), ed.color, 'fill');
-        } else if (r.target) {
-          ed.applyCells(surfaceFillCells(ed.frame, r.target, r.normal), ed.color, 'fill');
-        }
+        const c = ed.mode === 'layer' ? r.place : r.target;
+        // fillCells already includes the mirrored areas
+        if (c) ed.applyCells(ed.fillCells(c, r.normal), ed.color, 'fill', 'set', false);
         break;
       }
       case 'box':
       case 'line': {
         const c = erase ? r.target : r.place;
         if (!c) return;
-        this.drag = { erase, start: c, axis, level: c[axis], last: c, moved: false };
+        this.drag = drag(c, c[axis]);
         this.showShape(c, c);
         break;
       }
       case 'select': {
-        const c = ed.mode === 'layer' ? r.place : r.target ?? r.place;
+        const onVoxel = ed.mode !== 'layer' && !!r.target;
+        const c = onVoxel ? r.target : r.place;
         if (!c) {
           ed.setSelection(null);
           return;
         }
-        this.drag = { erase: false, start: c, axis, level: c[axis], last: c, moved: false };
+        this.drag = drag(c, c[axis], false, onVoxel);
         this.showShape(c, c);
         break;
       }
@@ -501,14 +618,25 @@ export class Viewport {
 
   private onMove(e: PointerEvent): void {
     const ed = this.editor;
-    if (!this.drag) {
+    this.lastPointer = e;
+    if (this.drag?.pointerId === e.pointerId && (e.buttons & 1) === 0) {
+      // The left button was released without a pointerup reaching us (for
+      // example while the right button was still held): finish the drag now
+      this.endDrag(true, e.shiftKey);
+    }
+    if (this.drag && this.drag.tool !== 'box' && this.drag.tool !== 'line' && this.drag.tool !== 'select' && !ed.stroking) {
+      // An undo, frame change or playback closed the stroke mid-drag; painting
+      // on would start writing somewhere else
+      this.drag = null;
+    }
+    const d = this.drag;
+    if (!d || d.pointerId !== e.pointerId) {
       this.updateCursor(e);
       return;
     }
-    const d = this.drag;
-    switch (ed.tool) {
+    switch (d.tool) {
       case 'add': {
-        const c = this.pickOnPlane(e, d.axis, d.level);
+        const c = this.pickOnPlane(e, d);
         if (c && (!d.last || c.some((v, i) => v !== d.last![i]))) {
           const path = d.last ? lineCells(d.last, c) : [c];
           ed.strokeSet(path.flatMap((p) => ed.brushAt(p)), d.erase ? 0 : ed.color, d.erase ? 'set' : 'add');
@@ -522,16 +650,16 @@ export class Viewport {
       case 'part': {
         const r = this.pick(e);
         if (r.target) {
-          const value = ed.tool === 'part' ? ed.activePart : ed.tool === 'erase' ? 0 : ed.color;
-          ed.strokeSet(ed.brushAt(r.target), value, ed.tool === 'paint' ? 'paint' : 'set');
+          const value = d.tool === 'part' ? ed.activePart : d.tool === 'erase' ? 0 : ed.color;
+          ed.strokeSet(ed.brushAt(r.target), value, d.tool === 'paint' ? 'paint' : 'set');
         }
-        this.showBrushAt(r.target, ed.tool === 'erase');
+        this.showBrushAt(r.target, d.tool === 'erase');
         break;
       }
       case 'box':
       case 'line':
       case 'select': {
-        const c = this.pickOnPlane(e, d.axis, d.level);
+        const c = this.pickOnPlane(e, d);
         if (c) {
           if (d.last && c.some((v, i) => v !== d.last![i])) d.moved = true;
           d.last = c;
@@ -543,19 +671,30 @@ export class Viewport {
   }
 
   private onUp(e: PointerEvent): void {
-    if (!this.drag || e.button !== 0) return;
-    const ed = this.editor;
+    // Any release ends the drag: with several buttons held, the pointerup
+    // reports the last button released, which need not be the left one
+    if (!this.drag || this.drag.pointerId !== e.pointerId) return;
+    this.endDrag(true, e.shiftKey);
+  }
+
+  /**
+   * Finishes the current drag. Strokes are always recorded; with `apply`
+   * false an unfinished box, line or selection is dropped instead of applied.
+   */
+  private endDrag(apply: boolean, shift = false): void {
     const d = this.drag;
+    if (!d) return;
     this.drag = null;
-    if (ed.tool === 'box' || ed.tool === 'line') {
-      if (d.start && d.last) {
-        const cells = ed.tool === 'box' ? boxCells(d.start, d.last) : lineCells(d.start, d.last);
-        ed.applyCells(cells, d.erase ? 0 : ed.color, ed.tool);
+    const ed = this.editor;
+    if (d.tool === 'box' || d.tool === 'line') {
+      if (apply && d.start && d.last) {
+        const cells = d.tool === 'box' ? boxCells(d.start, d.last) : lineCells(d.start, d.last);
+        ed.applyCells(cells, d.erase ? 0 : ed.color, d.tool);
       }
       this.hideCursor();
-    } else if (ed.tool === 'select') {
+    } else if (d.tool === 'select') {
       this.hideCursor();
-      if (!d.start || !d.last) return;
+      if (!apply || !d.start || !d.last) return;
       if (!d.moved && ed.mode === '3d') {
         // A click (no drag) selects the connected object
         if (ed.frame.get(d.start[0], d.start[1], d.start[2])) ed.selectConnected(d.start);
@@ -564,7 +703,7 @@ export class Viewport {
       }
       const b = normBox(d.start, d.last);
       const size = [ed.project.sx, ed.project.sy, ed.project.sz];
-      if (ed.mode === '3d' || e.shiftKey) {
+      if (ed.mode === '3d' || shift) {
         // Extend through the whole model along the axis the drag plane faces
         const ax = ed.mode === '3d' ? d.axis : 1;
         b.min[ax] = 0;
@@ -572,7 +711,7 @@ export class Viewport {
       }
       ed.setSelection(b);
     } else {
-      ed.endStroke(ed.tool);
+      ed.endStroke(d.tool);
     }
   }
 
@@ -580,6 +719,7 @@ export class Viewport {
     const ed = this.editor;
     const r = this.pick(e);
     if (ed.pivotPick !== null) {
+      this.hidePreview();
       this.showCursorAt(r.target ?? r.place, false, 1);
       this.onStatus('⊕');
       return;
@@ -591,11 +731,121 @@ export class Viewport {
     const brushed = ed.tool === 'add' || ed.tool === 'erase' || ed.tool === 'paint' || ed.tool === 'part';
     if (brushed) this.showBrushAt(c, erase);
     else this.showCursorAt(c, erase, 1);
+    this.updatePreview(e, c, r.normal, erase);
     if (c) {
       const v = ed.frame.get(c[0], c[1], c[2]);
       const part = ed.project.rig && v ? ed.project.rig.parts.find((p) => p.id === ed.project.rig!.partMap.get(c[0], c[1], c[2])) : undefined;
       this.onStatus(`x ${c[0]}  y ${c[1]}  z ${c[2]}${v ? `  #${v}` : ''}${part && ed.partOverlay ? `  · ${part.name}` : ''}`);
     } else this.onStatus('');
+  }
+
+  /**
+   * Shows what the tool would do here: the voxels a fill, paint, erase, add or
+   * part brush would change (mirrors included), and a hint with the color the
+   * eyedropper would pick or how many voxels a fill would recolor.
+   */
+  private updatePreview(e: PointerEvent, c: Vec3 | null, normal: Vec3, erase: boolean): void {
+    const ed = this.editor;
+    const tool = ed.tool;
+    if (!c) return this.hidePreview();
+    const pal = ed.project.palette;
+    const hex = (i: number) => '#' + (pal[i] ?? 0).toString(16).padStart(6, '0');
+    if (tool === 'pick') {
+      const v = ed.frame.get(c[0], c[1], c[2]);
+      this.hidePreview();
+      if (!v) return;
+      (this.cursorFill.material as THREE.MeshBasicMaterial).color.set(hex(v));
+      return this.showTip(e, hex(v), `${t('pickTip')} #${v} · ${hex(v).toUpperCase()}`);
+    }
+    if (tool !== 'fill' && tool !== 'paint' && tool !== 'add' && tool !== 'erase' && tool !== 'part') return this.hidePreview();
+    const g = ed.frame;
+    const rig = ed.project.rig;
+    const partColor = rig?.parts.find((p) => p.id === ed.activePart)?.color ?? 0xffffff;
+    const color = erase ? ERASE_COLOR : tool === 'part' ? partColor : pal[ed.color] ?? 0xffffff;
+    const key = [tool, erase, ed.mode, ed.layer, c, normal, ed.color, ed.activePart, ed.brush.size, ed.brush.shape, ed.mirror.x, ed.mirror.y, ed.mirror.z, ed.version(g), g.sx, g.sy, g.sz, color].join('|');
+    if (key === this.previewKey) {
+      if (this.preview.visible) this.cursorFill.visible = false;
+      if (!this.tip.hidden) this.moveTip(e);
+      return;
+    }
+    this.previewKey = key;
+    let cells: Vec3[];
+    if (tool === 'fill') cells = ed.fillCells(c, normal);
+    else {
+      // Brush cells and their mirror images that the stroke would actually change
+      const seen = new Set<number>();
+      cells = [];
+      for (const b of ed.brushAt(c))
+        for (const m of mirrored(g, b, ed.mirror)) {
+          if (!g.inBounds(m[0], m[1], m[2])) continue;
+          const i = g.index(m[0], m[1], m[2]);
+          const filled = g.data[i] !== 0;
+          if (seen.has(i) || (tool === 'add' && !erase ? filled : !filled)) continue;
+          seen.add(i);
+          cells.push(m);
+        }
+    }
+    this.setPreviewCells(cells, color);
+    if (tool !== 'fill') return this.hideTip();
+    const changed = cells.reduce((n, q) => n + (g.get(q[0], q[1], q[2]) !== ed.color ? 1 : 0), 0);
+    this.showTip(e, hex(ed.color), changed ? `${t('fillTip')} ${changed} ${t('voxels')}` : t('fillSame'));
+  }
+
+  private setPreviewCells(cells: Vec3[], color: number): void {
+    const ed = this.editor;
+    const g = ed.frame;
+    const show = cells.length > 0 && cells.length <= PREVIEW_LIMIT;
+    this.preview.visible = show;
+    this.preview.geometry.dispose();
+    this.preview.geometry = new THREE.BufferGeometry();
+    if (show) {
+      // In layer mode the voxels above the layer are hidden, so they don't cover anything
+      const maxY = ed.mode === 'layer' ? ed.layer : Infinity;
+      const m = buildCellFaces(cells, [g.sx, g.sy, g.sz], (x, y, z) => y <= maxY && g.get(x, y, z) !== 0);
+      const geo = this.preview.geometry;
+      geo.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
+      geo.setAttribute('normal', new THREE.BufferAttribute(m.normals, 3));
+      geo.setIndex(new THREE.BufferAttribute(m.indices, 1));
+      geo.computeBoundingSphere();
+      (this.preview.material as THREE.MeshLambertMaterial).color.setHex(color);
+      // The exact cells are shown, so the cursor box only outlines the brush
+      this.cursorFill.visible = false;
+    }
+    this.needsRender = true;
+  }
+
+  private showTip(e: PointerEvent, swatch: string, text: string): void {
+    this.tip.replaceChildren();
+    const chip = document.createElement('span');
+    chip.className = 'swatch';
+    chip.style.background = swatch;
+    this.tip.append(chip, text);
+    this.tip.hidden = false;
+    this.moveTip(e);
+  }
+
+  private moveTip(e: PointerEvent): void {
+    const rect = this.container.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    // Below right of the pointer, flipped to the other side near the edges
+    const w = this.tip.offsetWidth;
+    const h = this.tip.offsetHeight;
+    this.tip.style.left = `${x + 16 + w > rect.width ? Math.max(0, x - 12 - w) : x + 16}px`;
+    this.tip.style.top = `${y + 18 + h > rect.height ? Math.max(0, y - 10 - h) : y + 18}px`;
+  }
+
+  private hideTip(): void {
+    this.tip.hidden = true;
+  }
+
+  private hidePreview(): void {
+    this.previewKey = '';
+    if (this.preview.visible) {
+      this.preview.visible = false;
+      this.needsRender = true;
+    }
+    this.hideTip();
   }
 
   private showBrushAt(c: Vec3 | null, erase: boolean): void {
@@ -652,10 +902,25 @@ export class Viewport {
   private hideCursor(): void {
     this.cursor.visible = false;
     this.cursorFill.visible = false;
+    this.hidePreview();
     this.needsRender = true;
   }
 
   requestRender(): void {
     this.needsRender = true;
   }
+}
+
+/** Removes a group's children and frees their GPU resources. */
+function disposeChildren(group: THREE.Object3D): void {
+  for (const child of [...group.children]) {
+    child.traverse((o) => {
+      const m = o as THREE.Mesh;
+      m.geometry?.dispose();
+      const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+      if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+      else mat?.dispose();
+    });
+  }
+  group.clear();
 }

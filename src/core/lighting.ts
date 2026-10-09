@@ -58,21 +58,43 @@ export function lightDirection(light: Pick<LightSettings, 'azimuth' | 'elevation
   return [mx * Math.cos(e), Math.sin(e), mz * Math.cos(e)];
 }
 
-/** Marches from `p` towards the light; true if a filled voxel blocks it. */
+/**
+ * Marches from `p` towards the light; true if a filled voxel blocks it. Only
+ * the stretch of the ray inside the model's box is walked, so points far out
+ * on the ground still find the model between them and the light.
+ */
 export function inShadow(grid: VoxelGrid, p: V3, l: V3): boolean {
+  const size = [grid.sx, grid.sy, grid.sz];
+  let t0 = 0;
+  let t1 = Infinity;
+  for (let a = 0; a < 3; a++) {
+    if (Math.abs(l[a]) < 1e-9) {
+      if (p[a] < 0 || p[a] > size[a]) return false;
+      continue;
+    }
+    let ta = -p[a] / l[a];
+    let tb = (size[a] - p[a]) / l[a];
+    if (ta > tb) [ta, tb] = [tb, ta];
+    t0 = Math.max(t0, ta);
+    t1 = Math.min(t1, tb);
+    if (t0 > t1) return false;
+  }
   const step = 0.5;
-  let x = p[0];
-  let y = p[1];
-  let z = p[2];
-  const max = grid.sx + grid.sy + grid.sz;
-  for (let t = 0; t < max; t += step) {
-    x += l[0] * step;
-    y += l[1] * step;
-    z += l[2] * step;
-    if (y >= grid.sy || x < -1 || z < -1 || x > grid.sx + 1 || z > grid.sz + 1) return false;
-    if (grid.get(Math.floor(x), Math.floor(y), Math.floor(z))) return true;
+  for (let t = Math.max(t0, step); t <= t1 + step; t += step) {
+    if (grid.get(Math.floor(p[0] + l[0] * t), Math.floor(p[1] + l[1] * t), Math.floor(p[2] + l[2] * t))) return true;
   }
   return false;
+}
+
+/**
+ * How far (in voxels, along the ground) the ground shadow of a model `sy`
+ * voxels tall can reach past the model, capped at three times its height.
+ * Zero when there is no ground shadow.
+ */
+export function shadowReach(sy: number, light: Pick<LightSettings, 'enabled' | 'groundShadow' | 'elevation'> | null): number {
+  if (!light || !light.enabled || !light.groundShadow) return 0;
+  const e = Math.max(1, Math.min(90, light.elevation)) * DEG;
+  return Math.min(3 * sy, sy / Math.tan(e));
 }
 
 /**

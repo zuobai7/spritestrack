@@ -95,7 +95,8 @@ export function deserializeProject(text: string): Project {
   const json = JSON.parse(text) as ProjectJson;
   if (json.format !== FORMAT) throw new Error('Not a SpriteStrack project file');
   if (json.version > FORMAT_VERSION) throw new Error(`Unsupported project version ${json.version}`);
-  const [sx, sy, sz] = json.size;
+  const [sx, sy, sz] = json.size ?? [];
+  if (![sx, sy, sz].every((v) => Number.isInteger(v) && v >= 1 && v <= 256)) throw new Error('Invalid model size in project file');
   const p = new Project(sx, sy, sz, json.name);
   if (json.variants && json.variants.length) {
     p.variants = json.variants.map((v) => ({ name: v.name, palette: parseHexList(v.palette) }));
@@ -103,22 +104,27 @@ export function deserializeProject(text: string): Project {
   } else {
     p.palette = parseHexList(json.palette);
   }
+  // Every scheme needs at least one color to draw with
+  for (const v of p.variants) if (v.palette.length < 2) v.palette.push(0xffffff);
   const n = sx * sy * sz;
-  p.animations = json.animations.map(
-    (a): Animation => ({
-      name: a.name,
-      fps: a.fps,
-      frames: a.frames.map((f) => new VoxelGrid(sx, sy, sz, rleDecode(base64ToBytes(f), n))),
-    }),
-  );
+  p.animations = (json.animations ?? []).map((a): Animation => {
+    const frames = (a.frames ?? []).map((f) => new VoxelGrid(sx, sy, sz, rleDecode(base64ToBytes(f), n)));
+    // An animation without frames still opens, with one empty frame
+    if (!frames.length) frames.push(new VoxelGrid(sx, sy, sz));
+    return { name: String(a.name ?? 'idle'), fps: Math.max(1, Math.min(60, Math.round(Number(a.fps)) || 8)), frames };
+  });
   if (p.animations.length === 0) p.animations.push({ name: 'idle', fps: 8, frames: [new VoxelGrid(sx, sy, sz)] });
   if (json.rig) {
     const rig: Rig = {
       parts: json.rig.parts,
       partMap: new VoxelGrid(sx, sy, sz, rleDecode(base64ToBytes(json.rig.partMap), n)),
       animations: json.rig.animations,
-      source: json.rig.source ?? { anim: 0, frame: 0 },
+      source: { anim: 0, frame: 0 },
     };
+    // The rest pose must point at a frame that exists
+    const src = json.rig.source;
+    const anim = Math.max(0, Math.min(p.animations.length - 1, Math.floor(Number(src?.anim) || 0)));
+    rig.source = { anim, frame: Math.max(0, Math.min(p.animations[anim].frames.length - 1, Math.floor(Number(src?.frame) || 0))) };
     p.rig = rig;
   }
   return p;

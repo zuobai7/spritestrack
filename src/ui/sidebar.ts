@@ -340,6 +340,7 @@ function selectionSection(ed: Editor, scope: Scope): HTMLElement {
   };
   scope.add(ed.on('selection', render));
   scope.add(ed.on('frame', render));
+  scope.add(ed.on('project', render));
   render();
   return section('selection', t('selection'), icon('select', 16), false, info, buttons, h('p', { class: 'hint-text' }, t('selectionHint')));
 }
@@ -350,17 +351,22 @@ function modelSection(ed: Editor, scope: Scope): HTMLElement {
   const size = ['sx', 'sy', 'sz'].map(() => h('input', { type: 'number', min: '1', max: '256', step: '1' }));
   const count = h('div', { class: 'hint-text' });
   let allFrames = false;
+  const renderCount = () => {
+    const p = ed.project;
+    count.textContent = `${ed.frame.count()} ${t('voxels')} · ${p.animations.length} ${t('animations')} · ${p.frameCount()} ${t('frames')}`;
+  };
+  // The size fields only change with the model size, so typing in them isn't undone by edits or playback
   const render = () => {
     const p = ed.project;
     [p.sx, p.sy, p.sz].forEach((v, i) => (size[i].value = String(v)));
-    count.textContent = `${ed.frame.count()} ${t('voxels')} · ${p.animations.length} ${t('animations')} · ${p.frameCount()} ${t('frames')}`;
+    renderCount();
   };
   let pending: number | null = null;
   const soon = () => {
     if (pending === null)
       pending = window.setTimeout(() => {
         pending = null;
-        render();
+        renderCount();
       }, 300);
   };
   scope.add(ed.on('project', render));

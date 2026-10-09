@@ -202,8 +202,9 @@ const ease = (t: number, e: Easing) => (e === 'step' ? 0 : e === 'smooth' ? t * 
 /** Interpolated rotation/offset of a part at `frame` (may be fractional). */
 export function sampleTrack(anim: RigAnimation, part: number, frame: number): { rot: V3; pos: V3 } {
   const t = track(anim, part, false);
-  if (!t || t.keys.length === 0) return { rot: [0, 0, 0], pos: [0, 0, 0] };
-  const keys = t.keys;
+  // Keys past the end of the animation don't take part
+  const keys = t ? t.keys.filter((k) => k.frame < anim.length) : [];
+  if (keys.length === 0) return { rot: [0, 0, 0], pos: [0, 0, 0] };
   if (keys.length === 1) return { rot: [...keys[0].rot] as V3, pos: [...keys[0].pos] as V3 };
   let a: RigKey | null = null;
   let b: RigKey | null = null;

@@ -2,7 +2,7 @@ import type { Editor } from '../../editor/Editor';
 import { Project } from '../../core/Project';
 import type { VoxelGrid } from '../../core/VoxelGrid';
 import { MAX_COLORS } from '../../core/Palette';
-import { ColorMapper, fitImage, importExtrude, importHeightmap, importSliceStrip } from '../../core/imageImport';
+import { ColorMapper, fitImage, importExtrude, importHeightmap, importSliceStrip, resizeImage } from '../../core/imageImport';
 import { medianCut } from '../../export/gif';
 import type { RgbaImage } from '../../export/image';
 import { renderStack } from '../../export/stackRenderer';
@@ -79,7 +79,12 @@ export async function openImageImport(ed: Editor, file?: File): Promise<void> {
       const sw = st.dir === 'horizontal' ? img.width / n : img.width;
       const sh = st.dir === 'horizontal' ? img.height : img.height / n;
       const s = Math.min(1, st.max / Math.max(sw, sh));
-      if (s < 1) img = fitImage(img, Math.floor(Math.max(img.width, img.height) * s));
+      if (s < 1) {
+        // Every slice shrinks to the same whole number of pixels, so the strip still divides evenly
+        const tw = Math.max(1, Math.round(sw * s));
+        const th = Math.max(1, Math.round(sh * s));
+        img = st.dir === 'horizontal' ? resizeImage(img, tw * n, th) : resizeImage(img, tw, th * n);
+      }
     } else img = fitImage(img, st.max);
     // Too many colors for the palette: reduce them with median cut first, then map to the nearest
     let add = st.addColors;
@@ -88,7 +93,8 @@ export async function openImageImport(ed: Editor, file?: File): Promise<void> {
       const room = MAX_COLORS + 1 - palette.length;
       const missing = [...counts.keys()].filter((c) => palette.indexOf(c, 1) < 0);
       if (missing.length > room) {
-        palette.push(...medianCut(new Map(missing.map((c) => [c, counts.get(c)!])), Math.max(1, room)));
+        // A full palette takes no new colors: everything maps to the closest existing one
+        if (room > 0) palette.push(...medianCut(new Map(missing.map((c) => [c, counts.get(c)!])), room));
         add = false;
       }
     }

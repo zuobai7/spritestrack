@@ -8,8 +8,10 @@ import {
   fillRegion,
   flipRegion,
   floodCells,
+  floodMask,
   mirrored,
   pasteRegion,
+  surfaceFillCells,
   type Box,
   type BrushShape,
 } from '../core/tools';
@@ -125,7 +127,8 @@ export class Editor {
   pivotPick: number | null = null;
   light: LightSettings = { ...DEFAULT_LIGHT };
   selection: Box | null = null;
-  clipboard: { grid: VoxelGrid; origin: Vec3 } | null = null;
+  /** Copied voxels, with the palette they were copied with so paste can match colors. */
+  clipboard: { grid: VoxelGrid; origin: Vec3; palette: number[] } | null = null;
   reference: ReferenceImage | null = null;
   playing = false;
   readonly history = new History(300);
@@ -139,6 +142,10 @@ export class Editor {
   constructor(project: Project) {
     this.project = project;
     this.history.onChange = () => this.emit('history');
+    this.history.beforeStep = () => {
+      this.flushStroke();
+      this.commitLive();
+    };
   }
 
   on(ev: EditorEvent, fn: () => void): () => void {
@@ -181,6 +188,8 @@ export class Editor {
 
   setProject(p: Project): void {
     this.stop();
+    this.stroke = null;
+    this.live = null;
     this.project = p;
     this.animIndex = 0;
     this.frameIndex = 0;
@@ -189,8 +198,11 @@ export class Editor {
     this.selection = null;
     this.activePart = 0;
     this.pivotPick = null;
+    // A reference image belongs to the model it was traced for
+    this.reference = null;
     this.history.clear();
     this.emit('project');
+    this.emit('reference');
     this.dirty = false;
   }
 
@@ -232,6 +244,7 @@ export class Editor {
   }
 
   selectFrame(anim: number, frame: number): void {
+    this.flushStroke();
     this.animIndex = Math.max(0, Math.min(this.project.animations.length - 1, anim));
     this.frameIndex = Math.max(0, Math.min(this.anim.frames.length - 1, frame));
     this.emit('frame');
@@ -250,6 +263,7 @@ export class Editor {
   // ---- voxel strokes ------------------------------------------------------
 
   beginStroke(target: 'frame' | 'parts' = 'frame'): void {
+    this.flushStroke();
     const data = target === 'parts' ? this.ensureRig().partMap.data : this.frame.data;
     this.stroke = { edit: new VoxelEdit(data), anim: this.animIndex, frame: this.frameIndex, target };
   }
@@ -259,14 +273,23 @@ export class Editor {
     return brushCells(c, this.brush.size, this.brush.shape, this.mode === 'layer' ? 1 : null);
   }
 
-  /** Sets cells (with mirroring) inside the current stroke. Returns true if anything changed. */
-  strokeSet(cells: Vec3[], value: number, mode: WriteMode = 'set'): boolean {
-    if (!this.stroke) this.beginStroke();
-    const s = this.stroke!;
-    const g = this.frame;
+  /** True while a stroke is open; an undo, a frame change or playback closes it early. */
+  get stroking(): boolean {
+    return this.stroke !== null;
+  }
+
+  /**
+   * Sets cells (mirrored, unless `mirror` is false) inside the current stroke.
+   * Does nothing when no stroke is open. Returns true if anything changed.
+   */
+  strokeSet(cells: Vec3[], value: number, mode: WriteMode = 'set', mirror = true): boolean {
+    const s = this.stroke;
+    if (!s) return false;
+    // The frame the stroke started on, even if playback has moved on since
+    const g = this.frameAt(s.anim, s.frame);
     let changed = false;
     for (const c of cells)
-      for (const m of mirrored(g, c, this.mirror)) {
+      for (const m of mirror ? mirrored(g, c, this.mirror) : [c]) {
         if (!g.inBounds(m[0], m[1], m[2])) continue;
         const i = g.index(m[0], m[1], m[2]);
         if (s.target === 'parts') {
@@ -295,11 +318,44 @@ export class Editor {
     if (cmd) this.history.push(cmd);
   }
 
+  /** Records a stroke that was never ended (for example when the frame changes mid-drag). */
+  private flushStroke(): void {
+    if (this.stroke) this.endStroke('edit');
+  }
+
   /** One-shot edit of a set of cells. */
-  applyCells(cells: Vec3[], value: number, label: string, mode: WriteMode = 'set'): void {
+  applyCells(cells: Vec3[], value: number, label: string, mode: WriteMode = 'set', mirror = true): void {
     this.beginStroke();
-    this.strokeSet(cells, value, mode);
+    this.strokeSet(cells, value, mode, mirror);
     this.endStroke(label);
+  }
+
+  /**
+   * The cells the paint bucket recolors when clicking cell `c` (on the face
+   * with `normal` in 3D): the same-valued area of that layer in layer mode, or
+   * the same-colored surface facing `normal` in 3D. With mirroring on, each
+   * mirrored click point that holds the same value fills its own area too.
+   */
+  fillCells(c: Vec3, normal: Vec3): Vec3[] {
+    const g = this.frame;
+    const v = g.get(c[0], c[1], c[2]);
+    const layer = this.mode === 'layer';
+    if (!layer && !v) return [];
+    const seen = new Set<number>();
+    const out: Vec3[] = [];
+    for (const m of mirrored(g, c, this.mirror)) {
+      if (g.get(m[0], m[1], m[2]) !== v || seen.has(g.index(m[0], m[1], m[2]))) continue;
+      // Mirroring an axis also turns the clicked face around on that axis
+      const n: Vec3 = [normal[0], normal[1], normal[2]];
+      for (let a = 0; a < 3; a++) if (m[a] !== c[a]) n[a] = -n[a];
+      for (const q of layer ? floodCells(g, m, true) : surfaceFillCells(g, m, n)) {
+        const i = g.index(q[0], q[1], q[2]);
+        if (seen.has(i)) continue;
+        seen.add(i);
+        out.push(q);
+      }
+    }
+    return out;
   }
 
   // ---- transactions -------------------------------------------------------
@@ -351,6 +407,7 @@ export class Editor {
    */
   transaction(label: string, mutate: () => void, touched: { frames?: [number, number][]; partMap?: boolean } = {}): void {
     this.stop();
+    this.flushStroke();
     this.commitLive();
     const before = this.snapshot();
     const copies = (touched.frames ?? []).map(([a, f]) => ({ a, f, copy: this.frameAt(a, f).data.slice() }));
@@ -423,35 +480,57 @@ export class Editor {
 
   // ---- frames and animations ----------------------------------------------
 
+  /**
+   * Keeps the rig's rest pose on the same frame when frames or animations
+   * move: `map` gets the old (anim, frame) and returns the new one.
+   */
+  private moveRigSource(map: (anim: number, frame: number) => [number, number]): void {
+    const rig = this.project.rig;
+    if (!rig) return;
+    const [anim, frame] = map(rig.source.anim, rig.source.frame);
+    const a = this.project.animations[Math.max(0, Math.min(this.project.animations.length - 1, anim))];
+    rig.source = { anim: this.project.animations.indexOf(a), frame: Math.max(0, Math.min(a.frames.length - 1, frame)) };
+  }
+
   addFrame(duplicate: boolean): void {
     this.transaction('add frame', () => {
       const f = duplicate ? this.frame.clone() : new VoxelGrid(this.project.sx, this.project.sy, this.project.sz);
-      this.anim.frames.splice(this.frameIndex + 1, 0, f);
+      const ai = this.animIndex;
+      const at = this.frameIndex + 1;
+      this.anim.frames.splice(at, 0, f);
       this.frameIndex++;
+      this.moveRigSource((a, fi) => [a, a === ai && fi >= at ? fi + 1 : fi]);
     });
   }
 
   deleteFrame(): void {
     if (this.anim.frames.length <= 1) return;
     this.transaction('delete frame', () => {
-      this.anim.frames.splice(this.frameIndex, 1);
+      const ai = this.animIndex;
+      const at = this.frameIndex;
+      this.anim.frames.splice(at, 1);
       this.frameIndex = Math.min(this.frameIndex, this.anim.frames.length - 1);
+      // Deleting the rest pose itself hands it to the frame that takes its place
+      this.moveRigSource((a, fi) => [a, a === ai && fi > at ? fi - 1 : fi]);
     });
   }
 
   moveFrame(delta: number): void {
-    const to = this.frameIndex + delta;
+    const from = this.frameIndex;
+    const to = from + delta;
     if (to < 0 || to >= this.anim.frames.length) return;
     this.transaction('move frame', () => {
       const f = this.anim.frames;
-      [f[this.frameIndex], f[to]] = [f[to], f[this.frameIndex]];
+      const ai = this.animIndex;
+      [f[from], f[to]] = [f[to], f[from]];
       this.frameIndex = to;
+      this.moveRigSource((a, fi) => [a, a !== ai ? fi : fi === from ? to : fi === to ? from : fi]);
     });
   }
 
   addAnimation(name: string): void {
     this.transaction('add animation', () => {
-      this.project.animations.push({ name, fps: this.anim.fps, frames: [this.frame.clone()] });
+      this.project.animations.push({ name: uniqueName(name, this.project.animations.map((a) => a.name)), fps: this.anim.fps, frames: [this.frame.clone()] });
       this.animIndex = this.project.animations.length - 1;
       this.frameIndex = 0;
     });
@@ -460,26 +539,29 @@ export class Editor {
   deleteAnimation(): void {
     if (this.project.animations.length <= 1) return;
     this.transaction('delete animation', () => {
-      this.project.animations.splice(this.animIndex, 1);
+      const at = this.animIndex;
+      this.project.animations.splice(at, 1);
       this.animIndex = Math.max(0, this.animIndex - 1);
       this.frameIndex = 0;
+      // Deleting the rest pose's animation moves the rest pose to the first frame of the one before it
+      this.moveRigSource((a, fi) => (a === at ? [Math.max(0, at - 1), 0] : [a > at ? a - 1 : a, fi]));
     });
   }
 
   renameAnimation(name: string): void {
+    // Names stay unique: exports use them for rows, files and clips
+    const others = this.project.animations.filter((a) => a !== this.anim).map((a) => a.name);
     this.transaction('rename animation', () => {
-      this.anim.name = name;
+      this.anim.name = uniqueName(name, others);
     });
   }
 
   setFps(fps: number): void {
-    this.anim.fps = Math.max(1, Math.min(60, Math.round(fps)));
-    this.dirty = true;
-    if (this.playing) {
-      this.stop();
-      this.play();
-    }
-    this.emit('frames');
+    const v = Math.max(1, Math.min(60, Math.round(fps)));
+    if (!Number.isFinite(v) || v === this.anim.fps) return this.emit('frames');
+    const playing = this.playing;
+    this.transaction('frame rate', () => (this.anim.fps = v));
+    if (playing) this.play();
   }
 
   resize(sx: number, sy: number, sz: number): void {
@@ -498,25 +580,41 @@ export class Editor {
       this.transaction('rotate', () => {
         const p = this.project;
         for (const a of p.animations) a.frames = a.frames.map((f) => f.rotatedY());
-        if (p.rig) p.rig.partMap = p.rig.partMap.rotatedY();
+        if (p.rig) {
+          p.rig.partMap = p.rig.partMap.rotatedY();
+          for (const part of p.rig.parts) part.pivot = [p.sz - part.pivot[2], part.pivot[1], part.pivot[0]];
+        }
         [p.sx, p.sz] = [p.sz, p.sx];
         this.selection = null;
       });
       return;
     }
+    // The parts and pivots belong to the rest pose, so they turn with it
+    const rig = this.project.rig;
+    const withRig = !!rig && kind !== 'clear' && refs.some(([a, fi]) => a === rig.source.anim && fi === rig.source.frame);
     this.transaction(
       kind,
       () => {
-        for (const [a, fi] of refs) {
-          const f = this.frameAt(a, fi);
+        const turn = (f: VoxelGrid) => {
           if (kind === 'flipX') f.flip('x');
           else if (kind === 'flipY') f.flip('y');
           else if (kind === 'flipZ') f.flip('z');
           else if (kind === 'clear') f.data.fill(0);
           else if (kind === 'rotate') f.data.set(f.rotatedY().data);
+        };
+        for (const [a, fi] of refs) turn(this.frameAt(a, fi));
+        const r = this.project.rig;
+        if (withRig && r) {
+          turn(r.partMap);
+          const { sx, sy, sz } = this.project;
+          for (const part of r.parts) {
+            const [x, y, z] = part.pivot;
+            part.pivot =
+              kind === 'flipX' ? [sx - x, y, z] : kind === 'flipY' ? [x, sy - y, z] : kind === 'flipZ' ? [x, y, sz - z] : [sz - z, y, x];
+          }
         }
       },
-      { frames: refs },
+      { frames: refs, partMap: withRig },
     );
   }
 
@@ -536,16 +634,17 @@ export class Editor {
   selectConnected(c: Vec3): void {
     const g = this.frame;
     if (!g.get(c[0], c[1], c[2])) return this.setSelection(null);
-    const solid = new VoxelGrid(g.sx, g.sy, g.sz);
-    for (let i = 0; i < g.data.length; i++) solid.data[i] = g.data[i] ? 1 : 0;
-    const cells = floodCells(solid, c, false);
+    const mask = floodMask(g, c, (v) => v !== 0);
     const min: Vec3 = [Infinity, Infinity, Infinity];
     const max: Vec3 = [-Infinity, -Infinity, -Infinity];
-    for (const p of cells)
+    for (let i = 0; i < mask.length; i++) {
+      if (!mask[i]) continue;
+      const p = g.coords(i);
       for (let a = 0; a < 3; a++) {
         min[a] = Math.min(min[a], p[a]);
         max[a] = Math.max(max[a], p[a]);
       }
+    }
     this.setSelection({ min, max });
   }
 
@@ -560,7 +659,7 @@ export class Editor {
 
   copySelection(): void {
     const b = this.selectionOrAll();
-    this.clipboard = { grid: copyRegion(this.frame, b), origin: [...b.min] };
+    this.clipboard = { grid: copyRegion(this.frame, b), origin: [...b.min], palette: this.project.palette.slice() };
     this.emit('selection');
   }
 
@@ -601,10 +700,17 @@ export class Editor {
     const clip = this.clipboard;
     if (!clip) return;
     const at: Vec3 = this.selection ? [...this.selection.min] : [...clip.origin];
+    // Colors may have moved since the copy (palette edits, another project):
+    // every copied voxel takes the closest color of the current palette
+    const pal = this.project.palette;
+    const table = remapTable(clip.palette, pal);
+    for (let i = 1; i < clip.palette.length; i++) if (pal[i] === clip.palette[i]) table[i] = i;
+    const grid = clip.grid.clone();
+    for (let i = 0; i < grid.data.length; i++) if (grid.data[i]) grid.data[i] = table[grid.data[i]] || 1;
     this.transaction(
       'paste',
       () => {
-        pasteRegion(this.frame, clip.grid, at);
+        pasteRegion(this.frame, grid, at);
         this.selection = clampBox(this.frame, { min: at, max: [at[0] + clip.grid.sx - 1, at[1] + clip.grid.sy - 1, at[2] + clip.grid.sz - 1] });
       },
       { frames: this.here() },
@@ -625,7 +731,7 @@ export class Editor {
         const clip = copyRegion(g, b);
         fillRegion(g, b, 0);
         pasteRegion(g, clip, min);
-        this.selection = { min, max };
+        this.selection = clampBox(g, { min, max });
       },
       { frames: this.here() },
     );
@@ -659,6 +765,8 @@ export class Editor {
     for (const a of this.project.animations) for (const f of a.frames) for (const v of f.data) used[v] = 1;
     const pal = this.project.palette;
     const map = new Uint8Array(256);
+    // An empty model keeps the current color, so there is always one to draw with
+    if (!used.subarray(1).some((u) => u)) used[this.color] = 1;
     const keep: number[] = [0];
     for (let i = 1; i < pal.length; i++)
       if (used[i]) {
@@ -702,6 +810,13 @@ export class Editor {
         'remap palette',
         () => {
           for (const a of p.animations) for (const f of a.frames) for (let i = 0; i < f.data.length; i++) if (f.data[i]) f.data[i] = table[f.data[i]];
+          // Other color schemes keep their own color for each new index, taken
+          // from the first old index that moved there
+          const from = new Map<number, number>();
+          for (let i = p.palette.length - 1; i >= 1; i--) from.set(table[i], i);
+          p.variants.forEach((v, k) => {
+            if (k !== p.activeVariant) v.palette = next.map((c, j) => (j === 0 ? 0 : from.has(j) ? v.palette[from.get(j)!] ?? c : c));
+          });
           p.palette = next;
           this.color = 1;
         },
@@ -718,14 +833,18 @@ export class Editor {
     }
   }
 
+  /** Fills indices the active scheme lacks (from the longest scheme) so every voxel still has a color. */
+  private padPalette(): void {
+    const pal = this.project.palette;
+    const base = this.project.variants.reduce((a, v) => (v.palette.length > a.length ? v.palette : a), pal);
+    for (let k = pal.length; k < base.length; k++) pal.push(base[k]);
+  }
+
   switchVariant(i: number): void {
     if (i === this.project.activeVariant || !this.project.variants[i]) return;
     this.transaction('switch color scheme', () => {
       this.project.activeVariant = i;
-      const pal = this.project.palette;
-      // Fill indices the scheme lacks so every voxel still has a color
-      const base = this.project.variants.reduce((a, v) => (v.palette.length > a.length ? v.palette : a), pal);
-      for (let k = pal.length; k < base.length; k++) pal.push(base[k]);
+      this.padPalette();
     });
   }
 
@@ -743,14 +862,18 @@ export class Editor {
   deleteVariant(): void {
     if (this.project.variants.length <= 1) return;
     this.transaction('delete color scheme', () => {
-      this.project.variants.splice(this.project.activeVariant, 1);
+      const deleted = this.project.variants.splice(this.project.activeVariant, 1)[0];
       this.project.activeVariant = Math.max(0, this.project.activeVariant - 1);
+      // Colors added while the deleted scheme was active must stay usable
+      const pal = this.project.palette;
+      for (let k = pal.length; k < deleted.palette.length; k++) pal.push(deleted.palette[k]);
+      this.padPalette();
     });
   }
 
   // ---- procedural generation -----------------------------------------------
 
-  generate(gen: Generator, params: ParamValues, seed: number, target: GenTarget, frames = 8): void {
+  generate(gen: Generator, params: ParamValues, seed: number, target: GenTarget, frames = 8, name?: string): void {
     const p = this.project;
     const size: [number, number, number] = [p.sx, p.sy, p.sz];
     const palette = p.palette.slice();
@@ -762,7 +885,7 @@ export class Editor {
           ? runGenerator(gen, params, size, palette, { seed, t: i / n, frame: i, frameCount: n })
           : runGenerator(gen, params, size, palette, { seed, base: target === 'merge' ? this.frame : undefined }),
       );
-    this.applyGenerated(grids, palette, target, typeof gen.name === 'string' ? gen.name : gen.id);
+    this.applyGenerated(grids, palette, target, name ?? (typeof gen.name === 'string' ? gen.name : gen.id));
   }
 
   /**
@@ -864,9 +987,10 @@ export class Editor {
     const g = this.frame;
     if (!g.get(c[0], c[1], c[2])) return;
     const rig = this.ensureRig();
-    const cells = floodCells(g, c, false);
+    const v = g.get(c[0], c[1], c[2]);
+    const mask = floodMask(g, c, (x) => x === v);
     this.transaction('assign part', () => {
-      for (const p of cells) rig.partMap.set(p[0], p[1], p[2], this.activePart);
+      for (let i = 0; i < mask.length; i++) if (mask[i]) rig.partMap.data[i] = this.activePart;
     }, { partMap: true });
   }
 
@@ -940,6 +1064,7 @@ export class Editor {
 
   play(): void {
     if (this.playing) return;
+    this.flushStroke();
     this.playing = true;
     const tick = () => {
       const n = this.anim.frames.length;

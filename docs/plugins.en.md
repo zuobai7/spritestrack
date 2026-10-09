@@ -58,7 +58,7 @@ SpriteStrack.registerGenerator({
 | `color` | Color picker | `'#rrggbb'` string |
 | `select` | Dropdown, `options: [{ value, label }]` | the chosen `value` |
 
-`label` and `options[].label` can be `{ zh, en }` to follow the UI language.
+`label` and `options[].label` can be `{ zh, en }` to follow the UI language. A `number` parameter with `percent: true` shows its 0–1 value as a percentage, which suits sizes relative to the model.
 
 ### The `ctx` API
 

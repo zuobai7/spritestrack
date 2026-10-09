@@ -11,6 +11,8 @@ export class History {
   private redoStack: Command[] = [];
   limit: number;
   onChange: () => void = () => {};
+  /** Runs before an undo or redo, so unfinished edits can be recorded first. */
+  beforeStep: () => void = () => {};
 
   constructor(limit = 200) {
     this.limit = limit;
@@ -30,6 +32,7 @@ export class History {
   }
 
   undo(): boolean {
+    this.beforeStep();
     const cmd = this.undoStack.pop();
     if (!cmd) return false;
     cmd.undo();
@@ -39,6 +42,7 @@ export class History {
   }
 
   redo(): boolean {
+    this.beforeStep();
     const cmd = this.redoStack.pop();
     if (!cmd) return false;
     cmd.redo();

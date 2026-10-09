@@ -1,6 +1,6 @@
 import type { VoxelGrid } from '../core/VoxelGrid';
 import { shade } from '../core/Palette';
-import { FACE_NORMALS, FaceLighter, inShadow, lightDirection, visibleSideFace, type LightSettings } from '../core/lighting';
+import { FACE_NORMALS, FaceLighter, inShadow, lightDirection, shadowReach, visibleSideFace, type LightSettings } from '../core/lighting';
 import { createImage, outlineImage, putPixel, scaleImage, type RgbaImage } from './image';
 
 export interface StackOptions {
@@ -88,13 +88,14 @@ export function renderStack(grid: VoxelGrid, palette: number[], options: Partial
     // Shadow on the ground plane (y = 0): march from each ground point towards the light
     const l = lightDirection(light, o.angle);
     const alpha = Math.round(255 * Math.max(0, Math.min(1, light.shadowOpacity)));
+    const far = shadowReach(grid.sy, light) + 1;
     for (let py = 0; py < h; py++) {
       const v = (py + 0.5 - baseY) / o.squash;
       for (let px = 0; px < w; px++) {
         const u = px + 0.5 - cx;
         const gx = u * cos + v * sin + hx;
         const gz = -u * sin + v * cos + hz;
-        if (gx < -grid.sy * 2 || gz < -grid.sy * 2 || gx > grid.sx + grid.sy * 2 || gz > grid.sz + grid.sy * 2) continue;
+        if (gx < -far || gz < -far || gx > grid.sx + far || gz > grid.sz + far) continue;
         if (inShadow(grid, [gx, 0.01, gz], l)) putPixel(img, px, py, 0x000000, alpha);
       }
     }

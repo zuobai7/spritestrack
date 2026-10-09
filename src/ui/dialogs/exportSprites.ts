@@ -1,5 +1,12 @@
 import type { Editor } from '../../editor/Editor';
-import { buildSprites, DEFAULT_SPRITE_SETTINGS, type Render3d, type SpriteSettings } from '../../export/spriteExport';
+import {
+  buildSprites,
+  DEFAULT_SPRITE_SETTINGS,
+  STACK_VIEW_RANGE,
+  viewElevation,
+  type Render3d,
+  type SpriteSettings,
+} from '../../export/spriteExport';
 import { Sprite3dRenderer } from '../../export/sprite3d';
 import { encodeGif } from '../../export/gif';
 import { createZip, type ZipEntry } from '../../export/zip';
@@ -39,7 +46,7 @@ export function openSpriteExport(ed: Editor, preset?: Partial<SpriteSettings>): 
     renderer3d ??= new Sprite3dRenderer();
     return renderer3d.render(grid, palette, angle, {
       size: s.size,
-      elevation: s.elevation,
+      elevation: viewElevation(s.view),
       orthographic: s.ortho,
       light: s.useLight ? ed.light : { ...ed.light, enabled: false },
       outline: s.outline ? parseInt(s.outlineColor.slice(1), 16) : null,
@@ -97,10 +104,17 @@ export function openSpriteExport(ed: Editor, preset?: Partial<SpriteSettings>): 
       ),
       !slices && row(t('angles'), select(String(s.angles), ['1', '2', '4', '8', '16', '32'].map((v) => [v, v] as [string, string]), (v) => set('angles', Number(v)))),
       !slices && row(t('startAngle'), rangeInput(s.startAngle, 0, 359, 1, (v) => set('startAngle', v))),
+      isStack &&
+        row(
+          t('viewAngle'),
+          rangeInput(Math.max(STACK_VIEW_RANGE[0], Math.min(STACK_VIEW_RANGE[1], s.view)), STACK_VIEW_RANGE[0], STACK_VIEW_RANGE[1], 1, (v) =>
+            set('view', v),
+          ),
+        ),
+      is3d && row(t('viewAngle'), rangeInput(s.view, 0, 180, 1, (v) => set('view', v))),
+      !slices && h('p', { class: 'hint-text' }, isStack ? t('viewAngleHintStack') : t('viewAngleHint3d')),
       isStack && row(t('spacing'), rangeInput(s.spacing, 0.5, 3, 0.25, (v) => set('spacing', v))),
-      isStack && row(t('squash'), rangeInput(s.squash, 0.3, 1, 0.05, (v) => set('squash', v))),
       is3d && row(t('pixelSize'), rangeInput(s.size, 16, 512, 8, (v) => set('size', v))),
-      is3d && row(t('elevation'), rangeInput(s.elevation, 0, 90, 1, (v) => set('elevation', v))),
       is3d && row(t('orthographic'), checkbox(s.ortho, (v) => set('ortho', v))),
       slices &&
         row(
@@ -219,7 +233,7 @@ export function openSpriteExport(ed: Editor, preset?: Partial<SpriteSettings>): 
         else if (f.text) entries.push({ name: f.name, data: new TextEncoder().encode(f.text) });
         else if (f.gif) {
           const bg = s.gifBackground === 'color' ? parseInt(s.gifColor.slice(1), 16) : null;
-          entries.push({ name: f.name, data: encodeGif(f.gif.frames as RgbaImage[], { delay: f.gif.delay, background: bg }) });
+          entries.push({ name: f.name, data: encodeGif(f.gif.frames as RgbaImage[], { delay: f.gif.delay, delays: f.gif.delays, background: bg }) });
         }
       }
       let ok: boolean;

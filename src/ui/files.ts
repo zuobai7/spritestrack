@@ -38,21 +38,42 @@ export async function saveProjectFile(p: Project): Promise<boolean> {
 // ---- autosave ----------------------------------------------------------------
 
 const AUTOSAVE_KEY = 'spritestrack.autosave.v1';
+/** Whether the autosaved project had changes that were never saved to a file. */
+const AUTOSAVE_DIRTY_KEY = 'spritestrack.autosave.dirty';
 const PREFS_KEY = 'spritestrack.prefs.v1';
 
-export function writeAutosave(p: Project): boolean {
+export function writeAutosave(p: Project, dirty: boolean): boolean {
   try {
     localStorage.setItem(AUTOSAVE_KEY, serializeProject(p));
+    localStorage.setItem(AUTOSAVE_DIRTY_KEY, dirty ? '1' : '0');
     return true;
   } catch {
-    return false; // storage full or unavailable; the user can still save a file
+    // Storage full or unavailable. An older autosave must not come back on
+    // the next start as if it were the latest work.
+    try {
+      localStorage.removeItem(AUTOSAVE_KEY);
+      localStorage.removeItem(AUTOSAVE_DIRTY_KEY);
+    } catch {
+      /* ignore */
+    }
+    return false;
   }
 }
 
-export function readAutosave(): Project | null {
+/** Records that the autosaved project now matches a saved file. */
+export function markAutosaveClean(): void {
+  try {
+    if (localStorage.getItem(AUTOSAVE_KEY) !== null) localStorage.setItem(AUTOSAVE_DIRTY_KEY, '0');
+  } catch {
+    /* ignore */
+  }
+}
+
+export function readAutosave(): { project: Project; dirty: boolean } | null {
   try {
     const text = localStorage.getItem(AUTOSAVE_KEY);
-    return text ? deserializeProject(text) : null;
+    // Older autosaves have no flag; treat them as unsaved work to be safe
+    return text ? { project: deserializeProject(text), dirty: localStorage.getItem(AUTOSAVE_DIRTY_KEY) !== '0' } : null;
   } catch {
     return null;
   }

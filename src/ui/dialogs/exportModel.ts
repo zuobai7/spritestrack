@@ -1,7 +1,8 @@
 import type { Editor } from '../../editor/Editor';
 import type { Animation } from '../../core/Project';
 import { exportGlb } from '../../export/glb';
-import { exportMtl, exportObj } from '../../export/obj';
+import { exportMtl, exportObj, objToken } from '../../export/obj';
+import { uniqueNames } from '../../export/spriteExport';
 import { writeVox } from '../../export/vox';
 import { createZip, type ZipEntry } from '../../export/zip';
 import { t } from '../../i18n';
@@ -111,13 +112,16 @@ export function openModelExport(ed: Editor, format?: Format): void {
         const entries: ZipEntry[] = [];
         const used = new Set<number>();
         const single = anims.length === 1 && anims[0].frames.length === 1;
-        for (const a of anims)
+        const names = uniqueNames(anims.map((a) => safeName(a.name)));
+        const mtl = objToken(base);
+        anims.forEach((a, ai) =>
           a.frames.forEach((f, i) => {
-            const name = single ? base : `${safeName(a.name)}_${i}`;
+            const name = single ? base : `${names[ai]}_${i}`;
             for (const v of f.data) if (v) used.add(v);
-            entries.push({ name: `${name}.obj`, data: new TextEncoder().encode(exportObj(f, pal, name, { scale: s.scale, center: s.center, mtlName: base }).obj) });
-          });
-        entries.push({ name: `${base}.mtl`, data: new TextEncoder().encode(exportMtl(pal, used)) });
+            entries.push({ name: `${name}.obj`, data: new TextEncoder().encode(exportObj(f, pal, name, { scale: s.scale, center: s.center, mtlName: mtl }).obj) });
+          }),
+        );
+        entries.push({ name: `${mtl}.mtl`, data: new TextEncoder().encode(exportMtl(pal, used)) });
         ok = await saveFile(`${base}-obj.zip`, createZip(entries), 'application/zip');
       }
       if (ok) {

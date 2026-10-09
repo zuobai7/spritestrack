@@ -2,6 +2,9 @@ import type { VoxelGrid } from '../core/VoxelGrid';
 import { buildGreedyQuads } from '../core/mesher';
 import { rgb } from '../core/Palette';
 
+/** A name as one OBJ/MTL token (no whitespace). */
+export const objToken = (name: string) => name.trim().replace(/\s+/g, '_') || 'model';
+
 export interface ModelExportOptions {
   /** World units per voxel. */
   scale: number;
@@ -20,7 +23,8 @@ export function exportObj(
   const ox = opts.center ? grid.sx / 2 : 0;
   const oz = opts.center ? grid.sz / 2 : 0;
   const s = opts.scale;
-  const lines: string[] = [`# Exported by SpriteStrack`, `mtllib ${opts.mtlName ?? name}.mtl`, `o ${name}`];
+  // OBJ splits these lines at whitespace, so names must not contain any
+  const lines: string[] = [`# Exported by SpriteStrack`, `mtllib ${objToken(opts.mtlName ?? name)}.mtl`, `o ${objToken(name)}`];
   const normals = ['1 0 0', '-1 0 0', '0 1 0', '0 -1 0', '0 0 1', '0 0 -1'];
   for (const n of normals) lines.push(`vn ${n}`);
   const normalIndex = (n: number[]) => normals.indexOf(n.join(' ')) + 1;
